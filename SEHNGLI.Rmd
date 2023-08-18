@@ -1,0 +1,1699 @@
+---
+title: "SHENGLI-NEWS"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# SHENGLI-NEWS
+
+
+```{r}
+library(ordinal)
+library(sampling)
+library(pROC)
+VUS=function(y,pre,N_class)
+{
+  n=c()
+  for (i in 1:N_class) 
+    n[i]=sum(y==i)+0
+  
+  num=0
+  pre=pre[order(y)]
+  for (i in 1:n[1]) 
+    for (j in (n[1]+1):(n[1]+n[2])) 
+        for (k in (n[1]+n[2]+1):length(y)) 
+              if((pre[i]>pre[j])&(pre[j]>pre[k]))
+                num=num+1
+    
+  return(num/prod(n))
+}
+
+
+#auc(roc(y,pre[,2],levels=c('0','1'),direction=c('<')))
+
+
+library(ordinal)
+library(sampling)
+library(pROC)
+
+# dataset processing
+df_ini=read.csv(file='data.csv',header = T)
+df_ini=df_ini[,-1]
+n=rep(0,3)
+for (i in 1:3) {
+  n[i]=nrow(df_ini[df_ini$label==i-1,])
+}
+# sort by label
+df_ini=df_ini[order(df_ini$label),]
+df_ini$label=df_ini$label+1
+df_ini$label=as.factor(df_ini$label)
+
+
+#calculate NEWS
+NEWS_score=function(data)
+{
+  NEWS=data.frame(Conscious=rep(0,nrow(data)),Temp=rep(0,nrow(data)),Hrate=rep(0,nrow(data)),Breath=rep(0,nrow(data)),Sp=rep(0,nrow(data)),BloodOxy=rep(0,nrow(data)),label=rep(0,nrow(data)),total=rep(0,nrow(data)))
+
+  for (i in 1:nrow(data)){
+
+    if ((data$Breath[i]<=8)|(data$Breath[i]>=25))
+        NEWS$Breath[i]=3
+    if ((data$Breath[i]>=21)&(data$Breath[i]<=24))
+        NEWS$Breath[i]=2
+    if ((data$Breath[i]>=9)&(data$Breath[i]<=11))
+        NEWS$Breath[i]=1
+
+    if ((data$BloodOxy[i]<=91))
+        NEWS$BloodOxy[i]=3
+    if ((data$BloodOxy[i]>=92)&(data$BloodOxy[i]<=93))
+        NEWS$BloodOxy[i]=2
+    if ((data$BloodOxy[i]>=94)&(data$BloodOxy[i]<=95))
+        NEWS$BloodOxy[i]=1
+
+    if ((data$Sp[i]<=90)|(data$Sp[i]>=220))
+        NEWS$Sp[i]=3
+    if ((data$Sp[i]>=91)&(data$Sp[i]<=100))
+        NEWS$Sp[i]=2
+    if ((data$Sp[i]>=101)&(data$Sp[i]<=110))
+        NEWS$Sp[i]=1
+
+    if ((data$Hrate[i]<=40)|(data$Hrate[i]>=131))
+        NEWS$Hrate[i]=3
+    if ((data$Hrate[i]>=111)&(data$Hrate[i]<=130))
+        NEWS$Hrate[i]=2
+    if (((data$Hrate[i]>=41)&(data$Hrate[i]<=50))|((data$Hrate[i]>=91)&(data$Hrate[i]<=110)))
+        NEWS$Hrate[i]=1
+
+    if (data$Conscious[i]!='A')
+        NEWS$Conscious[i]=3
+
+    if (data$Temp[i]<=35)
+        NEWS$Temp[i]=3
+    if (data$Temp[i]>=39.1)
+        NEWS$Temp[i]=2
+    if (((data$Temp[i]>=35.1)&(data$Temp[i]<=36))|((data$Temp[i]>=38.1)&(data$Temp[i]<=39)))
+        NEWS$Temp[i]=1
+    NEWS$total[i]=sum(NEWS[i,1:6])
+    NEWS$label[i]=data$label[i]
+  }
+  return(NEWS)
+}
+NEWS_all=NEWS_score(df_ini)
+
+Sepsis_all=NEWS_all[NEWS_all$label!=1,]
+
+f=function(logit)
+{
+  return(exp(logit)/(1+exp(logit)))
+}
+# Calculate probability matrix for all
+cut_points=c(3,6)
+Score_all=NEWS_all$total
+num_class=3
+P_ini=matrix(0,nrow = nrow(df_ini),ncol=num_class)
+for (i in 1:nrow(P_ini)) {
+  P_ini[i,1]=f(-Score_all[i]+cut_points[1])
+  for (j in 2:(ncol(P_ini)-1)) {
+    P_ini[i,j]=f(-Score_all[i]+cut_points[j])-f(-Score_all[i]+cut_points[j-1])
+  }
+  P_ini[i,ncol(P_ini)]=1-f(-Score_all[i]+cut_points[(ncol(P_ini)-1)])
+}
+
+
+result_sepsis=data.frame(matrix(ncol=8,nrow=1))
+names(result_sepsis)=c('AUC','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+result_icu=data.frame(matrix(ncol=8,nrow=1))
+names(result_icu)=c('AUC','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+result_VUS=data.frame(matrix(ncol=8,nrow=1))
+
+names(result_VUS)=c('VUS','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+
+start_t=Sys.time()
+p_set=c(0.05,0.2,0.4)
+c_proportion=matrix(data = c(200,400,800,200,200,200,200,100,50),ncol=3)
+class_proportion=c('1:1:1','1:2:4','1:4:16')
+MAX_NUM=1000
+
+for(c in 1:3)
+{
+  for(j in 1:MAX_NUM)
+  {
+    print(j)
+    df_ID=strata(df_ini,stratanames = 'label',size = c_proportion[c,],method = 'srswor')$ID_unit
+    df=df_ini[df_ID,]
+    
+    while(sum(df$Conscious=='A')+0>nrow(df)*0.95)
+    {
+        df_ID=strata(df_ini,stratanames = 'label',size = c_proportion[c,],method = 'srswor')$ID_unit
+    df=df_ini[df_ID,]
+    }
+    
+    n=c_proportion[c,]
+    P=P_ini[df_ID,]
+    #print(P)
+    for (p in p_set){
+      train_ID=strata(df,stratanames = 'label',size=n*p,method = 'srswor')$ID_unit
+      train_ini=df[train_ID,]
+      
+      # avoid 1 factor
+      while(sum(train_ini$Conscious=='A')+0>=nrow(train_ini)-2)
+      {
+        train_ID=strata(df,stratanames = 'label',size=n*p,method = 'srswor')$ID_unit
+        train_ini=df[train_ID,]
+      }
+      
+      df_l=df[-train_ID,]
+      valid_ID=strata(df_l,stratanames = 'label',size=n*0.15,method = 'srswor')$ID_unit
+      valid=df_l[valid_ID,]
+      test=df_l[-valid_ID,]
+      
+      
+      NEWS_train=NEWS_all[train_ID,]
+      #Sepsis_all=NEWS_all[NEWS_all$label!=1,]
+      #print(Sepsis_all)
+      #NEWS_l=NEWS_all[-train_ID,]
+      #NEWS_valid=NEWS_all[valid_ID,]
+      #NEWS_test=NEWS_l[-valid_ID,]
+      
+      #Sepsis_test=NEWS_test[NEWS_test$label!=1,]
+      #print(auc(roc(as.numeric(Sepsis_all$label)-2,Sepsis_all$total,levels=c('0','1'),direction=c('<'))))
+      
+      train_P=P[train_ID,]
+      P_l=P[-train_ID,]
+      P_test=P_l[-valid_ID,]
+      
+      # normalization
+      for (i in 2:7)
+      {
+        train_ini[,i]=(train_ini[,i]-mean(train_ini[,i]))/sqrt(var(train_ini[,i]))
+        valid[,i]=(valid[,i]-mean(valid[,i]))/sqrt(var(valid[,i]))
+        test[,i]=(test[,i]-mean(test[,i]))/sqrt(var(test[,i]))
+      }
+      
+      # NEWS AUC on test
+      #pred_y=P_test[,2]+P_test[,3]
+      #print(pred_y)
+      #y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      #print(y)
+      #auc_NEWS_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      y=as.numeric(test$label)
+      VUS_NEWS=VUS(y,P_test[,1],3)
+      #test_sepsis=test[as.numeric(test$label)>1,]
+      #pred_y2=P_test[as.numeric(test$label)>1,3]
+      #y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      
+      #auc_NEWS_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      #print(c(auc_NEWS_sepsis,auc_NEWS_icu))
+      print(VUS_NEWS)
+      #result_sepsis=rbind(result_sepsis,c(auc_NEWS_sepsis,'NEWS',p,class_proportion[c],NA,NA,NA,NA))
+      #result_icu=rbind(result_icu,c(auc_NEWS_icu,'NEWS',p,class_proportion[c],NA,NA,NA,NA))
+      result_VUS=rbind(result_VUS,c(VUS_NEWS,'NEWS',p,class_proportion[c],NA,NA,NA,NA))
+      #Ordinal regression
+      #training
+      fit1=clm(label~.,data=train_ini,Hess=T,link='logit')
+      #testing
+      pre_y=predict(fit1,newdata=test[,-8],type='prob')$fit
+      
+      #pred_y=pre_y[,2]+pre_y[,3]
+      #y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      #auc_OR_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      VUS_OR=VUS(y,pre_y[,1],3)
+      
+      #pred_y2=pre_y[as.numeric(test$label)>1,3]
+      #y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      #auc_OR_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      #print(c(auc_OR_sepsis,auc_OR_icu))
+      print(VUS_OR)
+      #result_sepsis=rbind(result_sepsis,c(auc_OR_sepsis,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      #result_icu=rbind(result_icu,c(auc_OR_icu,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      result_VUS=rbind(result_VUS,c(VUS_OR,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      # adding weighted samples
+      
+      # calculate weights
+      
+      Weights_calculation=function(train_ini, probability_matrix=NA, class_number, alpha=NA, class_weights=NA)
+      {
+        #adding weights
+        weight=rep(alpha,nrow(train_ini))
+        for (i in 1:class_number) 
+        {
+          weight_add=(1-alpha)*class_weights[i]*probability_matrix[,i]
+          weight=c(weight,weight_add)
+        }
+        return(weight)
+      }
+      
+      MAX_TUNING=3
+      class_number=3
+      train=train_ini
+      best_VUS=best_auc_sepsis=best_auc_icu=0
+      for (i in 1:class_number)
+      {
+        train_add=train_ini
+        train_add$label=as.factor(i)
+        train=rbind(train,train_add)
+      }
+      
+      for (t in 1:MAX_TUNING) {
+        alpha=runif(1)
+        class_weights=sample(x=seq(0,1,0.01),size=class_number,replace = T)
+        
+        weight=Weights_calculation(train_ini=train_ini, probability_matrix=train_P, class_number=3, alpha=alpha, class_weights=class_weights)
+        
+        #training
+        fit2=clm(label~.,data=train,weights = weight ,Hess=T,link='logit')
+        
+        #validation
+        pre_y=predict(fit2,newdata=valid[,-8],type='prob')$fit
+        
+        #pred_y=pre_y[,2]+pre_y[,3]
+        #y=as.factor(ifelse(as.numeric(valid$label)>1,1,0))
+        y=as.numeric(valid$label)
+        #valid_sepsis=valid[as.numeric(valid$label)>1,]
+        #pred_y2=pre_y[as.numeric(valid$label)>1,3]
+        #y2=as.factor(ifelse(as.numeric(valid_sepsis$label)>2,1,0))
+        
+        #if((auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))>best_auc_sepsis)&(auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))>best_auc_icu))
+        #{
+        #  best_alpha=alpha
+        #  best_class_weight=class_weights
+        #  best_fit=fit2
+        #  best_auc_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+        #  best_auc_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+        #}
+        
+        if(VUS(y,pre_y[,1],3)>best_VUS)
+        {
+          best_alpha=alpha
+          best_class_weight=class_weights
+          best_fit=fit2
+          best_VUS=VUS(y,pre_y[,1],3)
+        }
+      }
+      
+        
+      #testing
+      par(mfrow=c(2,2))
+      pre_y=predict(best_fit,newdata=test[,-8],type='prob')$fit
+      #pred_y=pre_y[,2]+pre_y[,3]
+      #y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      y=as.numeric(test$label)
+      #auc_ORKD_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      VUS_ORKD=VUS(y,pre_y[,1],3)
+      #test_sepsis=test[as.numeric(test$label)>1,]
+      #pred_y2=pre_y[as.numeric(test$label)>1,3]
+      #y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      #auc_ORKD_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      #print(c(auc_ORKD_sepsis,auc_ORKD_icu))
+      print(VUS_ORKD)
+      #result_sepsis=rbind(result_sepsis,c(auc_ORKD_sepsis,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+      #result_icu=rbind(result_icu,c(auc_ORKD_icu,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+      result_VUS=rbind(result_VUS,c(VUS_ORKD,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+    }
+      
+  }
+}
+end_t=Sys.time()
+
+cat(end_t-start_t)
+#write.csv(result_sepsis,file = 'SHENGLI_NEWS_sepsis.csv')
+#write.csv(result_icu,file = 'SHENGLI_NEWS_ICU.csv')
+write.csv(result_VUS[result_VUS$train_proportion==0.05,],file='SHENGLI_NEWS_VUS_1.csv')
+write.csv(result_VUS[result_VUS$train_proportion==0.2,],file='SHENGLI_NEWS_VUS_2.csv')
+write.csv(result_VUS[result_VUS$train_proportion==0.4,],file='SHENGLI_NEWS_VUS_4.csv')
+
+
+
+library(ordinal)
+library(sampling)
+library(pROC)
+
+# dataset processing
+df_ini=read.csv(file='data.csv',header = T)
+df_ini=df_ini[,-1]
+n=rep(0,3)
+for (i in 1:3) {
+  n[i]=nrow(df_ini[df_ini$label==i-1,])
+}
+# sort by label
+df_ini=df_ini[order(df_ini$label),]
+df_ini$label=df_ini$label+1
+df_ini$label=as.factor(df_ini$label)
+
+
+#calculate SIRS
+SIRS_score=function(data)
+{
+  SIRS=data.frame(Temp=rep(0,nrow(data)),Hrate=rep(0,nrow(data)),Breath=rep(0,nrow(data)),Whitecellcounts=rep(0,nrow(data)),label=rep(0,nrow(data)),total=rep(0,nrow(data)))
+
+  for (i in 1:nrow(data)){
+
+    if (data$Breath[i]>20)
+        SIRS$Breath[i]=1
+
+    if (data$Hrate[i]>90)
+        SIRS$Hrate[i]=1
+
+    if (data$Temp[i]<36)
+        SIRS$Temp[i]=1
+    if (data$Temp[i]>=38.3)
+        SIRS$Temp[i]=1
+    
+    if ((data$Whitecellcounts[i]>12)|(data$Whitecellcounts[i]<4))
+        SIRS$Whitecellcounts[i]=1
+    
+    SIRS$total[i]=sum(SIRS[i,1:4])
+    SIRS$label[i]=data$label[i]
+  }
+  return(SIRS)
+}
+SIRS_all=SIRS_score(df_ini)
+
+Sepsis_all=SIRS_all[SIRS_all$label!=1,]
+
+f=function(logit)
+{
+  return(exp(logit)/(1+exp(logit)))
+}
+# Calculate probability matrix for all
+cut_points=c(1,3)
+Score_all=SIRS_all$total
+num_class=3
+P_ini=matrix(0,nrow = nrow(df_ini),ncol=num_class)
+for (i in 1:nrow(P_ini)) {
+  P_ini[i,1]=f(-Score_all[i]+cut_points[1])
+  for (j in 2:(ncol(P_ini)-1)) {
+    P_ini[i,j]=f(-Score_all[i]+cut_points[j])-f(-Score_all[i]+cut_points[j-1])
+  }
+  P_ini[i,ncol(P_ini)]=1-f(-Score_all[i]+cut_points[(ncol(P_ini)-1)])
+}
+
+result_sepsis=data.frame(matrix(ncol=8,nrow=1))
+names(result_sepsis)=c('AUC','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+result_icu=data.frame(matrix(ncol=8,nrow=1))
+names(result_icu)=c('AUC','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+result_VUS=data.frame(matrix(ncol=8,nrow=1))
+
+names(result_VUS)=c('VUS','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+start_t=Sys.time()
+p_set=c(0.05,0.2,0.4)
+c_proportion=matrix(data = c(200,400,800,200,200,200,200,100,50),ncol=3)
+class_proportion=c('1:1:1','1:2:4','1:4:16')
+MAX_NUM=1000
+
+for(c in 1:3)
+{
+  for(j in 1:MAX_NUM)
+  {
+    df_ID=strata(df_ini,stratanames = 'label',size = c_proportion[c,],method = 'srswor')$ID_unit
+    df=df_ini[df_ID,]
+    
+    while(sum(df$Conscious=='A')+0>nrow(df)*0.95)
+    {
+        df_ID=strata(df_ini,stratanames = 'label',size = c_proportion[c,],method = 'srswor')$ID_unit
+    df=df_ini[df_ID,]
+    }
+    
+    n=c_proportion[c,]
+    P=P_ini[df_ID,]
+    #print(P)
+    for (p in p_set){
+      
+      train_ID=strata(df,stratanames = 'label',size=n*p,method = 'srswor')$ID_unit
+      train_ini=df[train_ID,]
+      
+      # avoid 1 factor
+      while(sum(train_ini$Conscious=='A')+0>=nrow(train_ini)-2)
+      {
+        train_ID=strata(df,stratanames = 'label',size=n*p,method = 'srswor')$ID_unit
+        train_ini=df[train_ID,]
+      }
+      
+      df_l=df[-train_ID,]
+      valid_ID=strata(df_l,stratanames = 'label',size=n*0.15,method = 'srswor')$ID_unit
+      valid=df_l[valid_ID,]
+      test=df_l[-valid_ID,]
+      
+      
+      SIRS_train=SIRS_all[train_ID,]
+      #Sepsis_all=SIRS_all[SIRS_all$label!=1,]
+      #print(Sepsis_all)
+      #SIRS_l=SIRS_all[-train_ID,]
+      #SIRS_valid=SIRS_all[valid_ID,]
+      #SIRS_test=SIRS_l[-valid_ID,]
+      
+      #Sepsis_test=SIRS_test[SIRS_test$label!=1,]
+      #print(auc(roc(as.numeric(Sepsis_all$label)-2,Sepsis_all$total,levels=c('0','1'),direction=c('<'))))
+      
+      train_P=P[train_ID,]
+      P_l=P[-train_ID,]
+      P_test=P_l[-valid_ID,]
+      
+      # normalization
+      for (i in 2:7)
+      {
+        train_ini[,i]=(train_ini[,i]-mean(train_ini[,i]))/sqrt(var(train_ini[,i]))
+        valid[,i]=(valid[,i]-mean(valid[,i]))/sqrt(var(valid[,i]))
+        test[,i]=(test[,i]-mean(test[,i]))/sqrt(var(test[,i]))
+      }
+      
+      # SIRS AUC on test
+      #pred_y=P_test[,2]+P_test[,3]
+      #print(pred_y)
+      #y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      #print(y)
+      #auc_SIRS_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      y=as.numeric(test$label)
+      VUS_SIRS=VUS(y,P_test[,1],3)
+      #test_sepsis=test[as.numeric(test$label)>1,]
+      #pred_y2=P_test[as.numeric(test$label)>1,3]
+      #y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      
+      #auc_SIRS_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      #print(c(auc_SIRS_sepsis,auc_SIRS_icu))
+      print(VUS_SIRS)
+      #result_sepsis=rbind(result_sepsis,c(auc_SIRS_sepsis,'SIRS',p,class_proportion[c],NA,NA,NA,NA))
+      #result_icu=rbind(result_icu,c(auc_SIRS_icu,'SIRS',p,class_proportion[c],NA,NA,NA,NA))
+      result_VUS=rbind(result_VUS,c(VUS_SIRS,'SIRS',p,class_proportion[c],NA,NA,NA,NA))
+      #Ordinal regression
+      #training
+      fit1=clm(label~.,data=train_ini,Hess=T,link='logit')
+      #testing
+      pre_y=predict(fit1,newdata=test[,-8],type='prob')$fit
+      
+      #pred_y=pre_y[,2]+pre_y[,3]
+      #y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      #auc_OR_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      VUS_OR=VUS(y,pre_y[,1],3)
+      
+      #pred_y2=pre_y[as.numeric(test$label)>1,3]
+      #y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      #auc_OR_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      #print(c(auc_OR_sepsis,auc_OR_icu))
+      print(VUS_OR)
+      #result_sepsis=rbind(result_sepsis,c(auc_OR_sepsis,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      #result_icu=rbind(result_icu,c(auc_OR_icu,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      result_VUS=rbind(result_VUS,c(VUS_OR,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      # adding weighted samples
+      
+      # calculate weights
+      
+      Weights_calculation=function(train_ini, probability_matrix=NA, class_number, alpha=NA, class_weights=NA)
+      {
+        #adding weights
+        weight=rep(alpha,nrow(train_ini))
+        for (i in 1:class_number) 
+        {
+          weight_add=(1-alpha)*class_weights[i]*probability_matrix[,i]
+          weight=c(weight,weight_add)
+        }
+        return(weight)
+      }
+      
+      MAX_TUNING=3
+      class_number=3
+      train=train_ini
+      best_VUS=best_auc_sepsis=best_auc_icu=0
+      for (i in 1:class_number)
+      {
+        train_add=train_ini
+        train_add$label=as.factor(i)
+        train=rbind(train,train_add)
+      }
+      
+      for (t in 1:MAX_TUNING) {
+        alpha=runif(1)
+        class_weights=sample(x=seq(0,1,0.01),size=class_number,replace = T)
+        
+        weight=Weights_calculation(train_ini=train_ini, probability_matrix=train_P, class_number=3, alpha=alpha, class_weights=class_weights)
+        
+        #training
+        fit2=clm(label~.,data=train,weights = weight ,Hess=T,link='logit')
+        
+        #validation
+        pre_y=predict(fit2,newdata=valid[,-8],type='prob')$fit
+        
+        #pred_y=pre_y[,2]+pre_y[,3]
+        #y=as.factor(ifelse(as.numeric(valid$label)>1,1,0))
+        y=as.numeric(valid$label)
+        #valid_sepsis=valid[as.numeric(valid$label)>1,]
+        #pred_y2=pre_y[as.numeric(valid$label)>1,3]
+        #y2=as.factor(ifelse(as.numeric(valid_sepsis$label)>2,1,0))
+        
+        #if((auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))>best_auc_sepsis)&(auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))>best_auc_icu))
+        #{
+        #  best_alpha=alpha
+        #  best_class_weight=class_weights
+        #  best_fit=fit2
+        #  best_auc_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+        #  best_auc_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+        #}
+        
+        if(VUS(y,pre_y[,1],3)>best_VUS)
+        {
+          best_alpha=alpha
+          best_class_weight=class_weights
+          best_fit=fit2
+          best_VUS=VUS(y,pre_y[,1],3)
+        }
+      }
+      
+        
+      #testing
+      par(mfrow=c(2,2))
+      pre_y=predict(best_fit,newdata=test[,-8],type='prob')$fit
+      #pred_y=pre_y[,2]+pre_y[,3]
+      #y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      y=as.numeric(test$label)
+      #auc_ORKD_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      VUS_ORKD=VUS(y,pre_y[,1],3)
+      #test_sepsis=test[as.numeric(test$label)>1,]
+      #pred_y2=pre_y[as.numeric(test$label)>1,3]
+      #y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      #auc_ORKD_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      #print(c(auc_ORKD_sepsis,auc_ORKD_icu))
+      print(VUS_ORKD)
+      #result_sepsis=rbind(result_sepsis,c(auc_ORKD_sepsis,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+      #result_icu=rbind(result_icu,c(auc_ORKD_icu,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+      result_VUS=rbind(result_VUS,c(VUS_ORKD,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+    }
+      
+  }
+}
+end_t=Sys.time()
+
+cat(end_t-start_t)
+#write.csv(result_sepsis,file = 'SHENGLI_SIRS_sepsis.csv')
+#write.csv(result_icu,file = 'SHENGLI_SIRS_ICU.csv')
+write.csv(result_VUS[result_VUS$train_proportion==0.05,],file='SHENGLI_SIRS_VUS_1.csv')
+write.csv(result_VUS[result_VUS$train_proportion==0.2,],file='SHENGLI_SIRS_VUS_2.csv')
+write.csv(result_VUS[result_VUS$train_proportion==0.4,],file='SHENGLI_SIRS_VUS_4.csv')
+
+
+library(ordinal)
+library(sampling)
+library(pROC)
+
+# dataset processing
+df_ini=read.csv(file='data.csv',header = T)
+df_ini=df_ini[,-1]
+n=rep(0,3)
+for (i in 1:3) {
+  n[i]=nrow(df_ini[df_ini$label==i-1,])
+}
+# sort by label
+df_ini=df_ini[order(df_ini$label),]
+df_ini$label=df_ini$label+1
+df_ini$label=as.factor(df_ini$label)
+
+
+#calculate QSOFA
+QSOFA_score=function(data)
+{
+  QSOFA=data.frame(Breath=rep(0,nrow(data)),Conscious=rep(0,nrow(data)),Sp=rep(0,nrow(data)),label=rep(0,nrow(data)),total=rep(0,nrow(data)))
+
+  for (i in 1:nrow(data)){
+
+    if (data$Breath[i]>=22)
+        QSOFA$Breath[i]=1
+
+    if (data$Conscious[i]!='A')
+        QSOFA$Conscious[i]=3
+
+    if (data$Sp[i]<=100)
+        QSOFA$Sp[i]=1
+    
+    
+    QSOFA$total[i]=sum(QSOFA[i,1:3])
+    QSOFA$label[i]=data$label[i]
+  }
+  return(QSOFA)
+}
+QSOFA_all=QSOFA_score(df_ini)
+
+Sepsis_all=QSOFA_all[QSOFA_all$label!=1,]
+
+f=function(logit)
+{
+  return(exp(logit)/(1+exp(logit)))
+}
+# Calculate probability matrix for all
+cut_points=c(1,2)
+Score_all=QSOFA_all$total
+num_class=3
+P_ini=matrix(0,nrow = nrow(df_ini),ncol=num_class)
+for (i in 1:nrow(P_ini)) {
+  P_ini[i,1]=f(-Score_all[i]+cut_points[1])
+  for (j in 2:(ncol(P_ini)-1)) {
+    P_ini[i,j]=f(-Score_all[i]+cut_points[j])-f(-Score_all[i]+cut_points[j-1])
+  }
+  P_ini[i,ncol(P_ini)]=1-f(-Score_all[i]+cut_points[(ncol(P_ini)-1)])
+}
+
+result_sepsis=data.frame(matrix(ncol=8,nrow=1))
+names(result_sepsis)=c('AUC','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+result_icu=data.frame(matrix(ncol=8,nrow=1))
+names(result_icu)=c('AUC','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+result_VUS=data.frame(matrix(ncol=8,nrow=1))
+
+names(result_VUS)=c('VUS','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+start_t=Sys.time()
+p_set=c(0.05,0.2,0.4)
+c_proportion=matrix(data = c(200,400,800,200,200,200,200,100,50),ncol=3)
+class_proportion=c('1:1:1','1:2:4','1:4:16')
+MAX_NUM=1000
+
+for(c in 1:3)
+{
+  for(j in 1:MAX_NUM)
+  {
+    print(j)
+    df_ID=strata(df_ini,stratanames = 'label',size = c_proportion[c,],method = 'srswor')$ID_unit
+    df=df_ini[df_ID,]
+    
+    while(sum(df$Conscious=='A')+0>nrow(df)*0.95)
+    {
+        df_ID=strata(df_ini,stratanames = 'label',size = c_proportion[c,],method = 'srswor')$ID_unit
+    df=df_ini[df_ID,]
+    }
+    
+    n=c_proportion[c,]
+    P=P_ini[df_ID,]
+    #print(P)
+    for (p in p_set){
+      
+      train_ID=strata(df,stratanames = 'label',size=n*p,method = 'srswor')$ID_unit
+      train_ini=df[train_ID,]
+      
+      # avoid 1 factor
+      while(sum(train_ini$Conscious=='A')+0>=nrow(train_ini)-2)
+      {
+        train_ID=strata(df,stratanames = 'label',size=n*p,method = 'srswor')$ID_unit
+        train_ini=df[train_ID,]
+      }
+      
+      df_l=df[-train_ID,]
+      valid_ID=strata(df_l,stratanames = 'label',size=n*0.15,method = 'srswor')$ID_unit
+      valid=df_l[valid_ID,]
+      test=df_l[-valid_ID,]
+      
+      
+      QSOFA_train=QSOFA_all[train_ID,]
+      #Sepsis_all=QSOFA_all[QSOFA_all$label!=1,]
+      #print(Sepsis_all)
+      #QSOFA_l=QSOFA_all[-train_ID,]
+      #QSOFA_valid=QSOFA_all[valid_ID,]
+      #QSOFA_test=QSOFA_l[-valid_ID,]
+      
+      #Sepsis_test=QSOFA_test[QSOFA_test$label!=1,]
+      #print(auc(roc(as.numeric(Sepsis_all$label)-2,Sepsis_all$total,levels=c('0','1'),direction=c('<'))))
+      
+      train_P=P[train_ID,]
+      P_l=P[-train_ID,]
+      P_test=P_l[-valid_ID,]
+      
+      # normalization
+      for (i in 2:7)
+      {
+        train_ini[,i]=(train_ini[,i]-mean(train_ini[,i]))/sqrt(var(train_ini[,i]))
+        valid[,i]=(valid[,i]-mean(valid[,i]))/sqrt(var(valid[,i]))
+        test[,i]=(test[,i]-mean(test[,i]))/sqrt(var(test[,i]))
+      }
+      
+      # QSOFA AUC on test
+      #pred_y=P_test[,2]+P_test[,3]
+      #print(pred_y)
+      #y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      #print(y)
+      #auc_QSOFA_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      y=as.numeric(test$label)
+      VUS_QSOFA=VUS(y,P_test[,1],3)
+      #test_sepsis=test[as.numeric(test$label)>1,]
+      #pred_y2=P_test[as.numeric(test$label)>1,3]
+      #y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      
+      #auc_QSOFA_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      #print(c(auc_QSOFA_sepsis,auc_QSOFA_icu))
+      print(VUS_QSOFA)
+      #result_sepsis=rbind(result_sepsis,c(auc_QSOFA_sepsis,'QSOFA',p,class_proportion[c],NA,NA,NA,NA))
+      #result_icu=rbind(result_icu,c(auc_QSOFA_icu,'QSOFA',p,class_proportion[c],NA,NA,NA,NA))
+      result_VUS=rbind(result_VUS,c(VUS_QSOFA,'QSOFA',p,class_proportion[c],NA,NA,NA,NA))
+      #Ordinal regression
+      #training
+      fit1=clm(label~.,data=train_ini,Hess=T,link='logit')
+      #testing
+      pre_y=predict(fit1,newdata=test[,-8],type='prob')$fit
+      
+      #pred_y=pre_y[,2]+pre_y[,3]
+      #y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      #auc_OR_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      VUS_OR=VUS(y,pre_y[,1],3)
+      
+      #pred_y2=pre_y[as.numeric(test$label)>1,3]
+      #y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      #auc_OR_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      #print(c(auc_OR_sepsis,auc_OR_icu))
+      print(VUS_OR)
+      #result_sepsis=rbind(result_sepsis,c(auc_OR_sepsis,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      #result_icu=rbind(result_icu,c(auc_OR_icu,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      result_VUS=rbind(result_VUS,c(VUS_OR,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      # adding weighted samples
+      
+      # calculate weights
+      
+      Weights_calculation=function(train_ini, probability_matrix=NA, class_number, alpha=NA, class_weights=NA)
+      {
+        #adding weights
+        weight=rep(alpha,nrow(train_ini))
+        for (i in 1:class_number) 
+        {
+          weight_add=(1-alpha)*class_weights[i]*probability_matrix[,i]
+          weight=c(weight,weight_add)
+        }
+        return(weight)
+      }
+      
+      MAX_TUNING=3
+      class_number=3
+      train=train_ini
+      best_VUS=best_auc_sepsis=best_auc_icu=0
+      for (i in 1:class_number)
+      {
+        train_add=train_ini
+        train_add$label=as.factor(i)
+        train=rbind(train,train_add)
+      }
+      
+      for (t in 1:MAX_TUNING) {
+        alpha=runif(1)
+        class_weights=sample(x=seq(0,1,0.01),size=class_number,replace = T)
+        
+        weight=Weights_calculation(train_ini=train_ini, probability_matrix=train_P, class_number=3, alpha=alpha, class_weights=class_weights)
+        
+        #training
+        fit2=clm(label~.,data=train,weights = weight ,Hess=T,link='logit')
+        
+        #validation
+        pre_y=predict(fit2,newdata=valid[,-8],type='prob')$fit
+        
+        #pred_y=pre_y[,2]+pre_y[,3]
+        #y=as.factor(ifelse(as.numeric(valid$label)>1,1,0))
+        y=as.numeric(valid$label)
+        #valid_sepsis=valid[as.numeric(valid$label)>1,]
+        #pred_y2=pre_y[as.numeric(valid$label)>1,3]
+        #y2=as.factor(ifelse(as.numeric(valid_sepsis$label)>2,1,0))
+        
+        #if((auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))>best_auc_sepsis)&(auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))>best_auc_icu))
+        #{
+        #  best_alpha=alpha
+        #  best_class_weight=class_weights
+        #  best_fit=fit2
+        #  best_auc_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+        #  best_auc_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+        #}
+        
+        if(VUS(y,pre_y[,1],3)>best_VUS)
+        {
+          best_alpha=alpha
+          best_class_weight=class_weights
+          best_fit=fit2
+          best_VUS=VUS(y,pre_y[,1],3)
+        }
+      }
+      
+        
+      #testing
+      par(mfrow=c(2,2))
+      pre_y=predict(best_fit,newdata=test[,-8],type='prob')$fit
+      #pred_y=pre_y[,2]+pre_y[,3]
+      #y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      y=as.numeric(test$label)
+      #auc_ORKD_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      VUS_ORKD=VUS(y,pre_y[,1],3)
+      #test_sepsis=test[as.numeric(test$label)>1,]
+      #pred_y2=pre_y[as.numeric(test$label)>1,3]
+      #y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      #auc_ORKD_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      #print(c(auc_ORKD_sepsis,auc_ORKD_icu))
+      print(VUS_ORKD)
+      #result_sepsis=rbind(result_sepsis,c(auc_ORKD_sepsis,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+      #result_icu=rbind(result_icu,c(auc_ORKD_icu,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+      result_VUS=rbind(result_VUS,c(VUS_ORKD,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+    }
+      
+  }
+}
+end_t=Sys.time()
+
+cat(end_t-start_t)
+#write.csv(result_sepsis,file = 'SHENGLI_QSOFA_sepsis.csv')
+#write.csv(result_icu,file = 'SHENGLI_QSOFA_ICU.csv')
+write.csv(result_VUS[result_VUS$train_proportion==0.05,],file='SHENGLI_QSOFA_VUS_1.csv')
+write.csv(result_VUS[result_VUS$train_proportion==0.2,],file='SHENGLI_QSOFA_VUS_2.csv')
+write.csv(result_VUS[result_VUS$train_proportion==0.4,],file='SHENGLI_QSOFA_VUS_4.csv')
+```
+```{r}
+library(ordinal)
+library(sampling)
+library(pROC)
+
+# dataset processing
+df_ini=read.csv(file='MIMIC_data.csv',header = T)
+df_ini=df_ini[,-1]
+n=rep(0,3)
+for (i in 1:3) {
+  n[i]=nrow(df_ini[df_ini$label==i-1,])
+}
+# sort by label
+df_ini=df_ini[order(df_ini$label),]
+df_ini$label=df_ini$label+1
+df_ini$label=as.factor(df_ini$label)
+
+
+#calculate NEWS
+NEWS_score=function(data)
+{
+  NEWS=data.frame(Conscious=rep(0,nrow(data)),Temp=rep(0,nrow(data)),Hrate=rep(0,nrow(data)),Breath=rep(0,nrow(data)),Sp=rep(0,nrow(data)),BloodOxy=rep(0,nrow(data)),label=rep(0,nrow(data)),total=rep(0,nrow(data)))
+
+  for (i in 1:nrow(data)){
+
+    if ((data$Breath[i]<=8)|(data$Breath[i]>=25))
+        NEWS$Breath[i]=3
+    if ((data$Breath[i]>=21)&(data$Breath[i]<=24))
+        NEWS$Breath[i]=2
+    if ((data$Breath[i]>=9)&(data$Breath[i]<=11))
+        NEWS$Breath[i]=1
+
+    if ((data$BloodOxy[i]<=91))
+        NEWS$BloodOxy[i]=3
+    if ((data$BloodOxy[i]>=92)&(data$BloodOxy[i]<=93))
+        NEWS$BloodOxy[i]=2
+    if ((data$BloodOxy[i]>=94)&(data$BloodOxy[i]<=95))
+        NEWS$BloodOxy[i]=1
+
+    if ((data$Sp[i]<=90)|(data$Sp[i]>=220))
+        NEWS$Sp[i]=3
+    if ((data$Sp[i]>=91)&(data$Sp[i]<=100))
+        NEWS$Sp[i]=2
+    if ((data$Sp[i]>=101)&(data$Sp[i]<=110))
+        NEWS$Sp[i]=1
+
+    if ((data$Hrate[i]<=40)|(data$Hrate[i]>=131))
+        NEWS$Hrate[i]=3
+    if ((data$Hrate[i]>=111)&(data$Hrate[i]<=130))
+        NEWS$Hrate[i]=2
+    if (((data$Hrate[i]>=41)&(data$Hrate[i]<=50))|((data$Hrate[i]>=91)&(data$Hrate[i]<=110)))
+        NEWS$Hrate[i]=1
+
+    if (data$Conscious[i]!='A')
+        NEWS$Conscious[i]=3
+
+    if (data$Temp[i]<=35)
+        NEWS$Temp[i]=3
+    if (data$Temp[i]>=39.1)
+        NEWS$Temp[i]=2
+    if (((data$Temp[i]>=35.1)&(data$Temp[i]<=36))|((data$Temp[i]>=38.1)&(data$Temp[i]<=39)))
+        NEWS$Temp[i]=1
+    NEWS$total[i]=sum(NEWS[i,1:6])
+    NEWS$label[i]=data$label[i]
+  }
+  return(NEWS)
+}
+NEWS_all=NEWS_score(df_ini)
+
+Sepsis_all=NEWS_all[NEWS_all$label!=1,]
+
+f=function(logit)
+{
+  return(exp(logit)/(1+exp(logit)))
+}
+# Calculate probability matrix for all
+cut_points=c(3,6)
+Score_all=NEWS_all$total
+num_class=3
+P_ini=matrix(0,nrow = nrow(df_ini),ncol=num_class)
+for (i in 1:nrow(P_ini)) {
+  P_ini[i,1]=f(-Score_all[i]+cut_points[1])
+  for (j in 2:(ncol(P_ini)-1)) {
+    P_ini[i,j]=f(-Score_all[i]+cut_points[j])-f(-Score_all[i]+cut_points[j-1])
+  }
+  P_ini[i,ncol(P_ini)]=1-f(-Score_all[i]+cut_points[(ncol(P_ini)-1)])
+}
+
+
+result_sepsis=data.frame(matrix(ncol=8,nrow=1))
+names(result_sepsis)=c('AUC','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+result_icu=data.frame(matrix(ncol=8,nrow=1))
+names(result_icu)=c('AUC','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+
+result_VUS=data.frame(matrix(ncol=8,nrow=1))
+
+names(result_VUS)=c('VUS','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+start_t=Sys.time()
+p_set=c(0.05,0.2,0.4)
+c_proportion=matrix(data = c(200,400,800,200,200,200,200,100,50),ncol=3)
+class_proportion=c('1:1:1','1:2:4','1:4:16')
+MAX_NUM=1000
+
+for(c in 1:3)
+{
+  for(j in 1:MAX_NUM)
+  {
+    print(j)
+    df_ID=strata(df_ini,stratanames = 'label',size = c_proportion[c,],method = 'srswor')$ID_unit
+    df=df_ini[df_ID,]
+    
+    while(sum(df$Conscious=='A')+0>nrow(df)*0.95)
+    {
+        df_ID=strata(df_ini,stratanames = 'label',size = c_proportion[c,],method = 'srswor')$ID_unit
+    df=df_ini[df_ID,]
+    }
+    
+    n=c_proportion[c,]
+    P=P_ini[df_ID,]
+    #print(P)
+    for (p in p_set){
+      
+      train_ID=strata(df,stratanames = 'label',size=n*p,method = 'srswor')$ID_unit
+      train_ini=df[train_ID,]
+      
+      # avoid 1 factor
+      while(sum(train_ini$Conscious=='A')+0>=nrow(train_ini)-2)
+      {
+        train_ID=strata(df,stratanames = 'label',size=n*p,method = 'srswor')$ID_unit
+        train_ini=df[train_ID,]
+      }
+        
+      
+      df_l=df[-train_ID,]
+      
+      
+      valid_ID=strata(df_l,stratanames = 'label',size=n*0.15,method = 'srswor')$ID_unit
+      valid=df_l[valid_ID,]
+      test=df_l[-valid_ID,]
+      
+      
+      NEWS_train=NEWS_all[train_ID,]
+      #Sepsis_all=NEWS_all[NEWS_all$label!=1,]
+      #print(Sepsis_all)
+      #NEWS_l=NEWS_all[-train_ID,]
+      #NEWS_valid=NEWS_all[valid_ID,]
+      #NEWS_test=NEWS_l[-valid_ID,]
+      
+      #Sepsis_test=NEWS_test[NEWS_test$label!=1,]
+      #print(auc(roc(as.numeric(Sepsis_all$label)-2,Sepsis_all$total,levels=c('0','1'),direction=c('<'))))
+      
+      train_P=P[train_ID,]
+      P_l=P[-train_ID,]
+      P_test=P_l[-valid_ID,]
+      
+      # normalization
+      for (i in 2:7)
+      {
+        train_ini[,i]=(train_ini[,i]-mean(train_ini[,i]))/sqrt(var(train_ini[,i]))
+        valid[,i]=(valid[,i]-mean(valid[,i]))/sqrt(var(valid[,i]))
+        test[,i]=(test[,i]-mean(test[,i]))/sqrt(var(test[,i]))
+      }
+      
+      # NEWS AUC on test
+      #pred_y=P_test[,2]+P_test[,3]
+      #print(pred_y)
+      #y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      #print(y)
+      #auc_NEWS_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      y=as.numeric(test$label)
+      VUS_NEWS=VUS(y,P_test[,1],3)
+      #test_sepsis=test[as.numeric(test$label)>1,]
+      #pred_y2=P_test[as.numeric(test$label)>1,3]
+      #y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      
+      #auc_NEWS_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      #print(c(auc_NEWS_sepsis,auc_NEWS_icu))
+      print(VUS_NEWS)
+      #result_sepsis=rbind(result_sepsis,c(auc_NEWS_sepsis,'NEWS',p,class_proportion[c],NA,NA,NA,NA))
+      #result_icu=rbind(result_icu,c(auc_NEWS_icu,'NEWS',p,class_proportion[c],NA,NA,NA,NA))
+      result_VUS=rbind(result_VUS,c(VUS_NEWS,'NEWS',p,class_proportion[c],NA,NA,NA,NA))
+      #Ordinal regression
+      #training
+      fit1=clm(label~.,data=train_ini,Hess=T,link='logit')
+      #testing
+      pre_y=predict(fit1,newdata=test[,-8],type='prob')$fit
+      
+      #pred_y=pre_y[,2]+pre_y[,3]
+      #y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      #auc_OR_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      VUS_OR=VUS(y,pre_y[,1],3)
+      
+      #pred_y2=pre_y[as.numeric(test$label)>1,3]
+      #y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      #auc_OR_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      #print(c(auc_OR_sepsis,auc_OR_icu))
+      print(VUS_OR)
+      #result_sepsis=rbind(result_sepsis,c(auc_OR_sepsis,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      #result_icu=rbind(result_icu,c(auc_OR_icu,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      result_VUS=rbind(result_VUS,c(VUS_OR,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      # adding weighted samples
+      
+      # calculate weights
+      
+      Weights_calculation=function(train_ini, probability_matrix=NA, class_number, alpha=NA, class_weights=NA)
+      {
+        #adding weights
+        weight=rep(alpha,nrow(train_ini))
+        for (i in 1:class_number) 
+        {
+          weight_add=(1-alpha)*class_weights[i]*probability_matrix[,i]
+          weight=c(weight,weight_add)
+        }
+        return(weight)
+      }
+      
+      MAX_TUNING=3
+      class_number=3
+      train=train_ini
+      best_VUS=best_auc_sepsis=best_auc_icu=0
+      for (i in 1:class_number)
+      {
+        train_add=train_ini
+        train_add$label=as.factor(i)
+        train=rbind(train,train_add)
+      }
+      
+      for (t in 1:MAX_TUNING) {
+        alpha=runif(1)
+        class_weights=sample(x=seq(0,1,0.01),size=class_number,replace = T)
+        
+        weight=Weights_calculation(train_ini=train_ini, probability_matrix=train_P, class_number=3, alpha=alpha, class_weights=class_weights)
+        
+        #training
+        fit2=clm(label~.,data=train,weights = weight ,Hess=T,link='logit')
+        
+        #validation
+        pre_y=predict(fit2,newdata=valid[,-8],type='prob')$fit
+        
+        #pred_y=pre_y[,2]+pre_y[,3]
+        #y=as.factor(ifelse(as.numeric(valid$label)>1,1,0))
+        y=as.numeric(valid$label)
+        #valid_sepsis=valid[as.numeric(valid$label)>1,]
+        #pred_y2=pre_y[as.numeric(valid$label)>1,3]
+        #y2=as.factor(ifelse(as.numeric(valid_sepsis$label)>2,1,0))
+        
+        #if((auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))>best_auc_sepsis)&(auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))>best_auc_icu))
+        #{
+        #  best_alpha=alpha
+        #  best_class_weight=class_weights
+        #  best_fit=fit2
+        #  best_auc_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+        #  best_auc_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+        #}
+        
+        if(VUS(y,pre_y[,1],3)>best_VUS)
+        {
+          best_alpha=alpha
+          best_class_weight=class_weights
+          best_fit=fit2
+          best_VUS=VUS(y,pre_y[,1],3)
+        }
+      }
+      
+        
+      #testing
+      par(mfrow=c(2,2))
+      pre_y=predict(best_fit,newdata=test[,-8],type='prob')$fit
+      #pred_y=pre_y[,2]+pre_y[,3]
+      #y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      y=as.numeric(test$label)
+      #auc_ORKD_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      VUS_ORKD=VUS(y,pre_y[,1],3)
+      #test_sepsis=test[as.numeric(test$label)>1,]
+      #pred_y2=pre_y[as.numeric(test$label)>1,3]
+      #y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      #auc_ORKD_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      #print(c(auc_ORKD_sepsis,auc_ORKD_icu))
+      print(VUS_ORKD)
+      #result_sepsis=rbind(result_sepsis,c(auc_ORKD_sepsis,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+      #result_icu=rbind(result_icu,c(auc_ORKD_icu,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+      result_VUS=rbind(result_VUS,c(VUS_ORKD,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+    }
+      
+  }
+}
+end_t=Sys.time()
+
+cat(end_t-start_t)
+#write.csv(result_sepsis,file = 'SHENGLI_NEWS_sepsis.csv')
+#write.csv(result_icu,file = 'SHENGLI_NEWS_ICU.csv')
+write.csv(result_VUS[result_VUS$train_proportion==0.05,],file='MIMIC_NEWS_VUS_1.csv')
+write.csv(result_VUS[result_VUS$train_proportion==0.2,],file='MIMIC_NEWS_VUS_2.csv')
+write.csv(result_VUS[result_VUS$train_proportion==0.4,],file='MIMIC_NEWS_VUS_4.csv')
+
+library(ordinal)
+library(sampling)
+library(pROC)
+
+# dataset processing
+df_ini=read.csv(file='MIMIC_data.csv',header = T)
+df_ini=df_ini[,-1]
+n=rep(0,3)
+for (i in 1:3) {
+  n[i]=nrow(df_ini[df_ini$label==i-1,])
+}
+# sort by label
+df_ini=df_ini[order(df_ini$label),]
+df_ini$label=df_ini$label+1
+df_ini$label=as.factor(df_ini$label)
+
+
+#calculate SIRS
+SIRS_score=function(data)
+{
+  SIRS=data.frame(Temp=rep(0,nrow(data)),Hrate=rep(0,nrow(data)),Breath=rep(0,nrow(data)),Whitecellcounts=rep(0,nrow(data)),label=rep(0,nrow(data)),total=rep(0,nrow(data)))
+
+  for (i in 1:nrow(data)){
+
+    if (data$Breath[i]>20)
+        SIRS$Breath[i]=1
+
+    if (data$Hrate[i]>90)
+        SIRS$Hrate[i]=1
+
+    if (data$Temp[i]<36)
+        SIRS$Temp[i]=1
+    if (data$Temp[i]>=38.3)
+        SIRS$Temp[i]=1
+    
+    if ((data$Whitecellcounts[i]>12)|(data$Whitecellcounts[i]<4))
+        SIRS$Whitecellcounts[i]=1
+    
+    SIRS$total[i]=sum(SIRS[i,1:4])
+    SIRS$label[i]=data$label[i]
+  }
+  return(SIRS)
+}
+SIRS_all=SIRS_score(df_ini)
+
+Sepsis_all=SIRS_all[SIRS_all$label!=1,]
+
+f=function(logit)
+{
+  return(exp(logit)/(1+exp(logit)))
+}
+# Calculate probability matrix for all
+cut_points=c(1,3)
+Score_all=SIRS_all$total
+num_class=3
+P_ini=matrix(0,nrow = nrow(df_ini),ncol=num_class)
+for (i in 1:nrow(P_ini)) {
+  P_ini[i,1]=f(-Score_all[i]+cut_points[1])
+  for (j in 2:(ncol(P_ini)-1)) {
+    P_ini[i,j]=f(-Score_all[i]+cut_points[j])-f(-Score_all[i]+cut_points[j-1])
+  }
+  P_ini[i,ncol(P_ini)]=1-f(-Score_all[i]+cut_points[(ncol(P_ini)-1)])
+}
+
+result_sepsis=data.frame(matrix(ncol=8,nrow=1))
+names(result_sepsis)=c('AUC','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+result_icu=data.frame(matrix(ncol=8,nrow=1))
+names(result_icu)=c('AUC','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+
+result_VUS=data.frame(matrix(ncol=8,nrow=1))
+
+names(result_VUS)=c('VUS','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+start_t=Sys.time()
+p_set=c(0.05,0.2,0.4)
+c_proportion=matrix(data = c(200,400,800,200,200,200,200,100,50),ncol=3)
+class_proportion=c('1:1:1','1:2:4','1:4:16')
+MAX_NUM=1000
+
+for(c in 1:3)
+{
+  for(j in 1:MAX_NUM)
+  {
+    print(j)
+    df_ID=strata(df_ini,stratanames = 'label',size = c_proportion[c,],method = 'srswor')$ID_unit
+    df=df_ini[df_ID,]
+    
+    while(sum(df$Conscious=='A')+0>nrow(df)*0.95)
+    {
+        df_ID=strata(df_ini,stratanames = 'label',size = c_proportion[c,],method = 'srswor')$ID_unit
+    df=df_ini[df_ID,]
+    }
+    
+    n=c_proportion[c,]
+    P=P_ini[df_ID,]
+    #print(P)
+    for (p in p_set){
+      
+      train_ID=strata(df,stratanames = 'label',size=n*p,method = 'srswor')$ID_unit
+      train_ini=df[train_ID,]
+      
+      # avoid 1 factor
+      while(sum(train_ini$Conscious=='A')+0>=nrow(train_ini)-2)
+      {
+        train_ID=strata(df,stratanames = 'label',size=n*p,method = 'srswor')$ID_unit
+        train_ini=df[train_ID,]
+      }
+      
+      df_l=df[-train_ID,]
+      valid_ID=strata(df_l,stratanames = 'label',size=n*0.15,method = 'srswor')$ID_unit
+      valid=df_l[valid_ID,]
+      test=df_l[-valid_ID,]
+      
+      
+      SIRS_train=SIRS_all[train_ID,]
+      #Sepsis_all=SIRS_all[SIRS_all$label!=1,]
+      #print(Sepsis_all)
+      #SIRS_l=SIRS_all[-train_ID,]
+      #SIRS_valid=SIRS_all[valid_ID,]
+      #SIRS_test=SIRS_l[-valid_ID,]
+      
+      #Sepsis_test=SIRS_test[SIRS_test$label!=1,]
+      #print(auc(roc(as.numeric(Sepsis_all$label)-2,Sepsis_all$total,levels=c('0','1'),direction=c('<'))))
+      
+      train_P=P[train_ID,]
+      P_l=P[-train_ID,]
+      P_test=P_l[-valid_ID,]
+      
+      # normalization
+      for (i in 2:7)
+      {
+        train_ini[,i]=(train_ini[,i]-mean(train_ini[,i]))/sqrt(var(train_ini[,i]))
+        valid[,i]=(valid[,i]-mean(valid[,i]))/sqrt(var(valid[,i]))
+        test[,i]=(test[,i]-mean(test[,i]))/sqrt(var(test[,i]))
+      }
+      
+      # SIRS AUC on test
+      #pred_y=P_test[,2]+P_test[,3]
+      #print(pred_y)
+      #y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      #print(y)
+      #auc_SIRS_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      y=as.numeric(test$label)
+      VUS_SIRS=VUS(y,P_test[,1],3)
+      #test_sepsis=test[as.numeric(test$label)>1,]
+      #pred_y2=P_test[as.numeric(test$label)>1,3]
+      #y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      
+      #auc_SIRS_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      #print(c(auc_SIRS_sepsis,auc_SIRS_icu))
+      print(VUS_SIRS)
+      #result_sepsis=rbind(result_sepsis,c(auc_SIRS_sepsis,'SIRS',p,class_proportion[c],NA,NA,NA,NA))
+      #result_icu=rbind(result_icu,c(auc_SIRS_icu,'SIRS',p,class_proportion[c],NA,NA,NA,NA))
+      result_VUS=rbind(result_VUS,c(VUS_SIRS,'SIRS',p,class_proportion[c],NA,NA,NA,NA))
+      #Ordinal regression
+      #training
+      fit1=clm(label~.,data=train_ini,Hess=T,link='logit')
+      #testing
+      pre_y=predict(fit1,newdata=test[,-8],type='prob')$fit
+      
+      #pred_y=pre_y[,2]+pre_y[,3]
+      #y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      #auc_OR_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      VUS_OR=VUS(y,pre_y[,1],3)
+      
+      #pred_y2=pre_y[as.numeric(test$label)>1,3]
+      #y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      #auc_OR_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      #print(c(auc_OR_sepsis,auc_OR_icu))
+      print(VUS_OR)
+      #result_sepsis=rbind(result_sepsis,c(auc_OR_sepsis,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      #result_icu=rbind(result_icu,c(auc_OR_icu,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      result_VUS=rbind(result_VUS,c(VUS_OR,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      # adding weighted samples
+      
+      # calculate weights
+      
+      Weights_calculation=function(train_ini, probability_matrix=NA, class_number, alpha=NA, class_weights=NA)
+      {
+        #adding weights
+        weight=rep(alpha,nrow(train_ini))
+        for (i in 1:class_number) 
+        {
+          weight_add=(1-alpha)*class_weights[i]*probability_matrix[,i]
+          weight=c(weight,weight_add)
+        }
+        return(weight)
+      }
+      
+      MAX_TUNING=3
+      class_number=3
+      train=train_ini
+      best_VUS=best_auc_sepsis=best_auc_icu=0
+      for (i in 1:class_number)
+      {
+        train_add=train_ini
+        train_add$label=as.factor(i)
+        train=rbind(train,train_add)
+      }
+      
+      for (t in 1:MAX_TUNING) {
+        alpha=runif(1)
+        class_weights=sample(x=seq(0,1,0.01),size=class_number,replace = T)
+        
+        weight=Weights_calculation(train_ini=train_ini, probability_matrix=train_P, class_number=3, alpha=alpha, class_weights=class_weights)
+        
+        #training
+        fit2=clm(label~.,data=train,weights = weight ,Hess=T,link='logit')
+        
+        #validation
+        pre_y=predict(fit2,newdata=valid[,-8],type='prob')$fit
+        
+        #pred_y=pre_y[,2]+pre_y[,3]
+        #y=as.factor(ifelse(as.numeric(valid$label)>1,1,0))
+        y=as.numeric(valid$label)
+        #valid_sepsis=valid[as.numeric(valid$label)>1,]
+        #pred_y2=pre_y[as.numeric(valid$label)>1,3]
+        #y2=as.factor(ifelse(as.numeric(valid_sepsis$label)>2,1,0))
+        
+        #if((auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))>best_auc_sepsis)&(auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))>best_auc_icu))
+        #{
+        #  best_alpha=alpha
+        #  best_class_weight=class_weights
+        #  best_fit=fit2
+        #  best_auc_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+        #  best_auc_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+        #}
+        
+        if(VUS(y,pre_y[,1],3)>best_VUS)
+        {
+          best_alpha=alpha
+          best_class_weight=class_weights
+          best_fit=fit2
+          best_VUS=VUS(y,pre_y[,1],3)
+        }
+      }
+      
+        
+      #testing
+      par(mfrow=c(2,2))
+      pre_y=predict(best_fit,newdata=test[,-8],type='prob')$fit
+      #pred_y=pre_y[,2]+pre_y[,3]
+      #y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      y=as.numeric(test$label)
+      #auc_ORKD_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      VUS_ORKD=VUS(y,pre_y[,1],3)
+      #test_sepsis=test[as.numeric(test$label)>1,]
+      #pred_y2=pre_y[as.numeric(test$label)>1,3]
+      #y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      #auc_ORKD_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      #print(c(auc_ORKD_sepsis,auc_ORKD_icu))
+      print(VUS_ORKD)
+      #result_sepsis=rbind(result_sepsis,c(auc_ORKD_sepsis,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+      #result_icu=rbind(result_icu,c(auc_ORKD_icu,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+      result_VUS=rbind(result_VUS,c(VUS_ORKD,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+    }
+      
+  }
+}
+end_t=Sys.time()
+
+cat(end_t-start_t)
+#write.csv(result_sepsis,file = 'SHENGLI_SIRS_sepsis.csv')
+#write.csv(result_icu,file = 'SHENGLI_SIRS_ICU.csv')
+write.csv(result_VUS[result_VUS$train_proportion==0.05,],file='MIMIC_SIRS_VUS_1.csv')
+write.csv(result_VUS[result_VUS$train_proportion==0.2,],file='MIMIC_SIRS_VUS_2.csv')
+write.csv(result_VUS[result_VUS$train_proportion==0.4,],file='MIMIC_SIRS_VUS_4.csv')
+
+library(ordinal)
+library(sampling)
+library(pROC)
+
+# dataset processing
+df_ini=read.csv(file='MIMIC_data.csv',header = T)
+df_ini=df_ini[,-1]
+n=rep(0,3)
+for (i in 1:3) {
+  n[i]=nrow(df_ini[df_ini$label==i-1,])
+}
+# sort by label
+df_ini=df_ini[order(df_ini$label),]
+df_ini$label=df_ini$label+1
+df_ini$label=as.factor(df_ini$label)
+
+
+#calculate QSOFA
+QSOFA_score=function(data)
+{
+  QSOFA=data.frame(Breath=rep(0,nrow(data)),Conscious=rep(0,nrow(data)),Sp=rep(0,nrow(data)),label=rep(0,nrow(data)),total=rep(0,nrow(data)))
+
+  for (i in 1:nrow(data)){
+
+    if (data$Breath[i]>=22)
+        QSOFA$Breath[i]=1
+
+    if (data$Conscious[i]!='A')
+        QSOFA$Conscious[i]=3
+
+    if (data$Sp[i]<=100)
+        QSOFA$Sp[i]=1
+    
+    
+    QSOFA$total[i]=sum(QSOFA[i,1:3])
+    QSOFA$label[i]=data$label[i]
+  }
+  return(QSOFA)
+}
+QSOFA_all=QSOFA_score(df_ini)
+
+Sepsis_all=QSOFA_all[QSOFA_all$label!=1,]
+
+f=function(logit)
+{
+  return(exp(logit)/(1+exp(logit)))
+}
+# Calculate probability matrix for all
+cut_points=c(1,2)
+Score_all=QSOFA_all$total
+num_class=3
+P_ini=matrix(0,nrow = nrow(df_ini),ncol=num_class)
+for (i in 1:nrow(P_ini)) {
+  P_ini[i,1]=f(-Score_all[i]+cut_points[1])
+  for (j in 2:(ncol(P_ini)-1)) {
+    P_ini[i,j]=f(-Score_all[i]+cut_points[j])-f(-Score_all[i]+cut_points[j-1])
+  }
+  P_ini[i,ncol(P_ini)]=1-f(-Score_all[i]+cut_points[(ncol(P_ini)-1)])
+}
+
+result_sepsis=data.frame(matrix(ncol=8,nrow=1))
+names(result_sepsis)=c('AUC','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+result_icu=data.frame(matrix(ncol=8,nrow=1))
+names(result_icu)=c('AUC','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+
+result_VUS=data.frame(matrix(ncol=8,nrow=1))
+
+names(result_VUS)=c('VUS','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+start_t=Sys.time()
+p_set=c(0.05,0.2,0.4)
+c_proportion=matrix(data = c(200,400,800,200,200,200,200,100,50),ncol=3)
+class_proportion=c('1:1:1','1:2:4','1:4:16')
+MAX_NUM=1000
+
+for(c in 1:3)
+{
+  for(j in 1:MAX_NUM)
+  {
+    df_ID=strata(df_ini,stratanames = 'label',size = c_proportion[c,],method = 'srswor')$ID_unit
+    df=df_ini[df_ID,]
+    
+    while(sum(df$Conscious=='A')+0>nrow(df)*0.95)
+    {
+        df_ID=strata(df_ini,stratanames = 'label',size = c_proportion[c,],method = 'srswor')$ID_unit
+    df=df_ini[df_ID,]
+    }
+    
+    n=c_proportion[c,]
+    P=P_ini[df_ID,]
+    #print(P)
+    for (p in p_set){
+      
+      train_ID=strata(df,stratanames = 'label',size=n*p,method = 'srswor')$ID_unit
+      train_ini=df[train_ID,]
+      
+      # avoid 1 factor
+      while(sum(train_ini$Conscious=='A')+0>=nrow(train_ini)-2)
+      {
+        train_ID=strata(df,stratanames = 'label',size=n*p,method = 'srswor')$ID_unit
+        train_ini=df[train_ID,]
+      }
+      
+      df_l=df[-train_ID,]
+      valid_ID=strata(df_l,stratanames = 'label',size=n*0.15,method = 'srswor')$ID_unit
+      valid=df_l[valid_ID,]
+      test=df_l[-valid_ID,]
+      
+      
+      QSOFA_train=QSOFA_all[train_ID,]
+      #Sepsis_all=QSOFA_all[QSOFA_all$label!=1,]
+      #print(Sepsis_all)
+      #QSOFA_l=QSOFA_all[-train_ID,]
+      #QSOFA_valid=QSOFA_all[valid_ID,]
+      #QSOFA_test=QSOFA_l[-valid_ID,]
+      
+      #Sepsis_test=QSOFA_test[QSOFA_test$label!=1,]
+      #print(auc(roc(as.numeric(Sepsis_all$label)-2,Sepsis_all$total,levels=c('0','1'),direction=c('<'))))
+      
+      train_P=P[train_ID,]
+      P_l=P[-train_ID,]
+      P_test=P_l[-valid_ID,]
+      
+      # normalization
+      for (i in 2:7)
+      {
+        train_ini[,i]=(train_ini[,i]-mean(train_ini[,i]))/sqrt(var(train_ini[,i]))
+        valid[,i]=(valid[,i]-mean(valid[,i]))/sqrt(var(valid[,i]))
+        test[,i]=(test[,i]-mean(test[,i]))/sqrt(var(test[,i]))
+      }
+      
+      # QSOFA AUC on test
+      #pred_y=P_test[,2]+P_test[,3]
+      #print(pred_y)
+      #y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      #print(y)
+      #auc_QSOFA_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      y=as.numeric(test$label)
+      VUS_QSOFA=VUS(y,P_test[,1],3)
+      #test_sepsis=test[as.numeric(test$label)>1,]
+      #pred_y2=P_test[as.numeric(test$label)>1,3]
+      #y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      
+      #auc_QSOFA_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      #print(c(auc_QSOFA_sepsis,auc_QSOFA_icu))
+      print(VUS_QSOFA)
+      #result_sepsis=rbind(result_sepsis,c(auc_QSOFA_sepsis,'QSOFA',p,class_proportion[c],NA,NA,NA,NA))
+      #result_icu=rbind(result_icu,c(auc_QSOFA_icu,'QSOFA',p,class_proportion[c],NA,NA,NA,NA))
+      result_VUS=rbind(result_VUS,c(VUS_QSOFA,'QSOFA',p,class_proportion[c],NA,NA,NA,NA))
+      #Ordinal regression
+      #training
+      fit1=clm(label~.,data=train_ini,Hess=T,link='logit')
+      #testing
+      pre_y=predict(fit1,newdata=test[,-8],type='prob')$fit
+      
+      #pred_y=pre_y[,2]+pre_y[,3]
+      #y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      #auc_OR_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      VUS_OR=VUS(y,pre_y[,1],3)
+      
+      #pred_y2=pre_y[as.numeric(test$label)>1,3]
+      #y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      #auc_OR_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      #print(c(auc_OR_sepsis,auc_OR_icu))
+      print(VUS_OR)
+      #result_sepsis=rbind(result_sepsis,c(auc_OR_sepsis,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      #result_icu=rbind(result_icu,c(auc_OR_icu,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      result_VUS=rbind(result_VUS,c(VUS_OR,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      # adding weighted samples
+      
+      # calculate weights
+      
+      Weights_calculation=function(train_ini, probability_matrix=NA, class_number, alpha=NA, class_weights=NA)
+      {
+        #adding weights
+        weight=rep(alpha,nrow(train_ini))
+        for (i in 1:class_number) 
+        {
+          weight_add=(1-alpha)*class_weights[i]*probability_matrix[,i]
+          weight=c(weight,weight_add)
+        }
+        return(weight)
+      }
+      
+      MAX_TUNING=3
+      class_number=3
+      train=train_ini
+      best_VUS=best_auc_sepsis=best_auc_icu=0
+      for (i in 1:class_number)
+      {
+        train_add=train_ini
+        train_add$label=as.factor(i)
+        train=rbind(train,train_add)
+      }
+      
+      for (t in 1:MAX_TUNING) {
+        alpha=runif(1)
+        class_weights=sample(x=seq(0,1,0.01),size=class_number,replace = T)
+        
+        weight=Weights_calculation(train_ini=train_ini, probability_matrix=train_P, class_number=3, alpha=alpha, class_weights=class_weights)
+        
+        #training
+        fit2=clm(label~.,data=train,weights = weight ,Hess=T,link='logit')
+        
+        #validation
+        pre_y=predict(fit2,newdata=valid[,-8],type='prob')$fit
+        
+        #pred_y=pre_y[,2]+pre_y[,3]
+        #y=as.factor(ifelse(as.numeric(valid$label)>1,1,0))
+        y=as.numeric(valid$label)
+        #valid_sepsis=valid[as.numeric(valid$label)>1,]
+        #pred_y2=pre_y[as.numeric(valid$label)>1,3]
+        #y2=as.factor(ifelse(as.numeric(valid_sepsis$label)>2,1,0))
+        
+        #if((auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))>best_auc_sepsis)&(auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))>best_auc_icu))
+        #{
+        #  best_alpha=alpha
+        #  best_class_weight=class_weights
+        #  best_fit=fit2
+        #  best_auc_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+        #  best_auc_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+        #}
+        
+        if(VUS(y,pre_y[,1],3)>best_VUS)
+        {
+          best_alpha=alpha
+          best_class_weight=class_weights
+          best_fit=fit2
+          best_VUS=VUS(y,pre_y[,1],3)
+        }
+      }
+      
+        
+      #testing
+      par(mfrow=c(2,2))
+      pre_y=predict(best_fit,newdata=test[,-8],type='prob')$fit
+      #pred_y=pre_y[,2]+pre_y[,3]
+      #y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      y=as.numeric(test$label)
+      #auc_ORKD_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      VUS_ORKD=VUS(y,pre_y[,1],3)
+      #test_sepsis=test[as.numeric(test$label)>1,]
+      #pred_y2=pre_y[as.numeric(test$label)>1,3]
+      #y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      #auc_ORKD_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      #print(c(auc_ORKD_sepsis,auc_ORKD_icu))
+      print(VUS_ORKD)
+      #result_sepsis=rbind(result_sepsis,c(auc_ORKD_sepsis,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+      #result_icu=rbind(result_icu,c(auc_ORKD_icu,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+      result_VUS=rbind(result_VUS,c(VUS_ORKD,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+    }
+      
+  }
+}
+end_t=Sys.time()
+
+cat(end_t-start_t)
+#write.csv(result_sepsis,file = 'SHENGLI_QSOFA_sepsis.csv')
+#write.csv(result_icu,file = 'SHENGLI_QSOFA_ICU.csv')
+write.csv(result_VUS[result_VUS$train_proportion==0.05,],file='MIMIC_QSOFA_VUS_1.csv')
+write.csv(result_VUS[result_VUS$train_proportion==0.2,],file='MIMIC_QSOFA_VUS_2.csv')
+write.csv(result_VUS[result_VUS$train_proportion==0.4,],file='MIMIC_QSOFA_VUS_4.csv')
+```
