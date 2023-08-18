@@ -1,0 +1,409 @@
+---
+title: "Report-221122"
+author: "SA21001115 Ji Yu"
+header-includes:
+  - \usepackage{ctex}
+output: 
+  beamer_presentation:
+    latex_engine: xelatex
+
+fontsize: 8pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,warning = FALSE)
+```
+
+# Review
+
+In last week, we have shown that adding weighted samples has the same results as KLD regularization when we use logistic regression.
+
+In this week, we have the following tasks:
+
+- Task1: repeat the results on different size of training set and different proportion of classes 1000 times.
+
+- Task2: try it on ordinal regression and give a general algorithm for adding weighted samples.
+
+- Task3: Some problems about GPU server
+
+# Task1
+
+Here we give the same results as before.
+
+![](LRKLD.png){#id .class width=80% height=80%}
+
+# Task2
+
+The calculation in R is time-consuming, here we only give some informal results.
+
+```{r,results='hide'}
+library(ordinal)
+library(sampling)
+library(pROC)
+```
+
+
+```{r}
+# dataset processing
+df_ini=read.csv(file='data.csv',header = T)
+df_ini=df_ini[,-1]
+n=rep(0,3)
+for (i in 1:3) {
+  n[i]=nrow(df_ini[df_ini$label==i-1,])
+}
+# sort by label
+df_ini=df_ini[order(df_ini$label),]
+df_ini$label=df_ini$label+1
+df_ini$label=as.factor(df_ini$label)
+
+
+#calculate NEWS
+NEWS_score=function(data)
+{
+  NEWS=data.frame(Conscious=rep(0,nrow(data)),Temp=rep(0,nrow(data)),Hrate=rep(0,nrow(data)),Breath=rep(0,nrow(data)),Sp=rep(0,nrow(data)),BloodOxy=rep(0,nrow(data)),label=rep(0,nrow(data)),total=rep(0,nrow(data)))
+
+  for (i in 1:nrow(data)){
+
+    if ((data$Breath[i]<=8)|(data$Breath[i]>=25))
+        NEWS$Breath[i]=3
+    if ((data$Breath[i]>=21)&(data$Breath[i]<=24))
+        NEWS$Breath[i]=2
+    if ((data$Breath[i]>=9)&(data$Breath[i]<=11))
+        NEWS$Breath[i]=1
+
+    if ((data$BloodOxy[i]<=91))
+        NEWS$BloodOxy[i]=3
+    if ((data$BloodOxy[i]>=92)&(data$BloodOxy[i]<=93))
+        NEWS$BloodOxy[i]=2
+    if ((data$BloodOxy[i]>=94)&(data$BloodOxy[i]<=95))
+        NEWS$BloodOxy[i]=1
+
+    if ((data$Sp[i]<=90)|(data$Sp[i]>=220))
+        NEWS$Sp[i]=3
+    if ((data$Sp[i]>=91)&(data$Sp[i]<=100))
+        NEWS$Sp[i]=2
+    if ((data$Sp[i]>=101)&(data$Sp[i]<=110))
+        NEWS$Sp[i]=1
+
+    if ((data$Hrate[i]<=40)|(data$Hrate[i]>=131))
+        NEWS$Hrate[i]=3
+    if ((data$Hrate[i]>=111)&(data$Hrate[i]<=130))
+        NEWS$Hrate[i]=2
+    if (((data$Hrate[i]>=41)&(data$Hrate[i]<=50))|((data$Hrate[i]>=91)&(data$Hrate[i]<=110)))
+        NEWS$Hrate[i]=1
+
+    if (data$Conscious[i]!='A')
+        NEWS$Conscious[i]=3
+
+    if (data$Temp[i]<=35)
+        NEWS$Temp[i]=3
+    if (data$Temp[i]>=39.1)
+        NEWS$Temp[i]=2
+    if (((data$Temp[i]>=35.1)&(data$Temp[i]<=36))|((data$Temp[i]>=38.1)&(data$Temp[i]<=39)))
+        NEWS$Temp[i]=1
+    NEWS$total[i]=sum(NEWS[i,1:6])
+    NEWS$label[i]=data$label[i]
+  }
+  return(NEWS)
+}
+NEWS_all=NEWS_score(df_ini)
+
+Sepsis_all=NEWS_all[NEWS_all$label!=1,]
+
+f=function(logit)
+{
+  return(exp(logit)/(1+exp(logit)))
+}
+# Calculate probability matrix for all
+cut_points=c(3,6)
+Score_all=NEWS_all$total
+num_class=3
+P_ini=matrix(0,nrow = nrow(df_ini),ncol=num_class)
+for (i in 1:nrow(P_ini)) {
+  P_ini[i,1]=f(-Score_all[i]+cut_points[1])
+  for (j in 2:(ncol(P_ini)-1)) {
+    P_ini[i,j]=f(-Score_all[i]+cut_points[j])-f(-Score_all[i]+cut_points[j-1])
+  }
+  P_ini[i,ncol(P_ini)]=1-f(-Score_all[i]+cut_points[(ncol(P_ini)-1)])
+}
+```
+
+```{r}
+table(df_ini$label)
+
+```
+
+```{r}
+result_sepsis=data.frame(matrix(ncol=8,nrow=1))
+names(result_sepsis)=c('AUC','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+result_icu=data.frame(matrix(ncol=8,nrow=1))
+names(result_icu)=c('AUC','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
+
+
+start_t=Sys.time()
+p_set=c(0.05,0.1,0.2,0.4)
+c_proportion=matrix(data = c(300,1200,2700,9000,300,600,800,900,300,300,200,90),ncol=3)
+class_proportion=c('1:1:1','1:2:4','1:3:9','1:10:100')
+MAX_NUM=1000
+```
+```{r}
+for(c in 1:4)
+{
+  for(j in 1:MAX_NUM)
+  {
+    df_ID=strata(df_ini,stratanames = 'label',size = c_proportion[c,],method = 'srswor')$ID_unit
+    df=df_ini[df_ID,]
+    n=c_proportion[c,]
+    P=P_ini[df_ID,]
+    #print(P)
+    for (p in p_set){
+      
+      train_ID=strata(df,stratanames = 'label',size=n*p,method = 'srswor')$ID_unit
+      train_ini=df[train_ID,]
+      df_l=df[-train_ID,]
+      valid_ID=strata(df_l,stratanames = 'label',size=n*(1-p)/2,method = 'srswor')$ID_unit
+      valid=df_l[valid_ID,]
+      test=df_l[-valid_ID,]
+      
+      
+      NEWS_train=NEWS_all[train_ID,]
+      #Sepsis_all=NEWS_all[NEWS_all$label!=1,]
+      #print(Sepsis_all)
+      #NEWS_l=NEWS_all[-train_ID,]
+      #NEWS_valid=NEWS_all[valid_ID,]
+      #NEWS_test=NEWS_l[-valid_ID,]
+      
+      #Sepsis_test=NEWS_test[NEWS_test$label!=1,]
+      #print(auc(roc(as.numeric(Sepsis_all$label)-2,Sepsis_all$total,levels=c('0','1'),direction=c('<'))))
+      
+      train_P=P[train_ID,]
+      P_l=P[-train_ID,]
+      P_test=P_l[-valid_ID,]
+      
+      # normalization
+      for (i in 2:7)
+      {
+        train_ini[,i]=(train_ini[,i]-mean(train_ini[,i]))/sqrt(var(train_ini[,i]))
+        valid[,i]=(valid[,i]-mean(valid[,i]))/sqrt(var(valid[,i]))
+        test[,i]=(test[,i]-mean(test[,i]))/sqrt(var(test[,i]))
+      }
+      
+      # NEWS AUC on test
+      pred_y=P_test[,2]+P_test[,3]
+      #print(pred_y)
+      y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      #print(y)
+      auc_NEWS_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      
+      test_sepsis=test[as.numeric(test$label)>1,]
+      pred_y2=P_test[as.numeric(test$label)>1,3]
+      y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      
+      auc_NEWS_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      print(c(auc_NEWS_sepsis,auc_NEWS_icu))
+      
+      result_sepsis=rbind(result_sepsis,c(auc_NEWS_sepsis,'NEWS',p,class_proportion[c],NA,NA,NA,NA))
+      result_icu=rbind(result_icu,c(auc_NEWS_icu,'NEWS',p,class_proportion[c],NA,NA,NA,NA))
+      
+      #Ordinal regression
+      #training
+      fit1=clm(label~.,data=train_ini,Hess=T,link='logit')
+      #testing
+      pre_y=predict(fit1,newdata=test[,-8],type='prob')$fit
+      
+      pred_y=pre_y[,2]+pre_y[,3]
+      y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      auc_OR_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      
+      
+      pred_y2=pre_y[as.numeric(test$label)>1,3]
+      y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      auc_OR_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      print(c(auc_OR_sepsis,auc_OR_icu))
+      
+      result_sepsis=rbind(result_sepsis,c(auc_OR_sepsis,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      result_icu=rbind(result_icu,c(auc_OR_icu,'OR',p,class_proportion[c],NA,NA,NA,NA))
+      
+      # adding weighted samples
+      
+      # calculate weights
+      
+      Weights_calculation=function(train_ini, probability_matrix=NA, class_number, alpha=NA, class_weights=NA)
+      {
+        #adding weights
+        weight=rep(alpha,nrow(train_ini))
+        for (i in 1:class_number) 
+        {
+          weight_add=(1-alpha)*class_weights[i]*probability_matrix[,i]
+          weight=c(weight,weight_add)
+        }
+        return(weight)
+      }
+      
+      MAX_TUNING=100
+      class_number=3
+      train=train_ini
+      best_auc_sepsis=best_auc_icu=0
+      for (i in 1:class_number)
+      {
+        train_add=train_ini
+        train_add$label=as.factor(i)
+        train=rbind(train,train_add)
+      }
+      
+      for (t in 1:MAX_TUNING) {
+        alpha=runif(1)
+        class_weights=sample(x=seq(0,1,0.01),size=class_number,replace = T)
+        
+        weight=Weights_calculation(train_ini=train_ini, probability_matrix=train_P, class_number=3, alpha=alpha, class_weights=class_weights)
+        
+        #training
+        fit2=clm(label~.,data=train,weights = weight ,Hess=T,link='logit')
+        
+        #validation
+        pre_y=predict(fit2,newdata=valid[,-8],type='prob')$fit
+        
+        pred_y=pre_y[,2]+pre_y[,3]
+        y=as.factor(ifelse(as.numeric(valid$label)>1,1,0))
+        
+        valid_sepsis=valid[as.numeric(valid$label)>1,]
+        pred_y2=pre_y[as.numeric(valid$label)>1,3]
+        y2=as.factor(ifelse(as.numeric(valid_sepsis$label)>2,1,0))
+        
+        if((auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))>best_auc_sepsis)&(auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))>best_auc_icu))
+        {
+          best_alpha=alpha
+          best_class_weight=class_weights
+          best_fit=fit2
+          best_auc_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+          best_auc_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+        }
+      }
+      
+      #testing
+      par(mfrow=c(2,2))
+      pre_y=predict(best_fit,newdata=test[,-8],type='prob')$fit
+      pred_y=pre_y[,2]+pre_y[,3]
+      y=as.factor(ifelse(as.numeric(test$label)>1,1,0))
+      auc_ORKD_sepsis=auc(roc(y,pred_y,levels=c('0','1'),direction=c('<')))
+      
+      test_sepsis=test[as.numeric(test$label)>1,]
+      pred_y2=pre_y[as.numeric(test$label)>1,3]
+      y2=as.factor(ifelse(as.numeric(test_sepsis$label)>2,1,0))
+      auc_ORKD_icu=auc(roc(y2,pred_y2,levels=c('0','1'),direction=c('<')))
+      print(c(auc_ORKD_sepsis,auc_ORKD_icu))
+      
+      result_sepsis=rbind(result_sepsis,c(auc_ORKD_sepsis,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+      result_icu=rbind(result_icu,c(auc_ORKD_icu,'ORKD',p,class_proportion[c],best_alpha,best_class_weight))
+    }
+      
+  }
+}
+end_t=Sys.time()
+```
+
+```{r}
+result_sepsis=result_sepsis[-1,]
+result_icu=result_icu[-1,]
+cat(end_t-start_t)
+```
+```{r}
+result_sepsis
+result_icu
+```
+
+```{r}
+#p=0.05
+#result_sepsis$train_proportion=result_icu$train_proportion
+
+```
+```{r}
+i=0
+
+result_sepsis=read.csv('ORKD_sepsis_result.csv')
+result_icu=read.csv('ORKD_icu_result.csv')
+for(p in c(0.05,0.1,0.2,0.4)){
+  
+  
+  for (c in class_proportion) {
+    i=i+1
+    setEPS()
+    postscript(paste('AUC',i,'.eps',sep=''))
+    plot(x=result_sepsis$AUC[(result_sepsis$method=='NEWS')&(result_sepsis$train_proportion==p)&(result_sepsis$class_proportion==c)],y=result_icu$AUC[(result_sepsis$method=='NEWS')&(result_sepsis$train_proportion==p)&(result_sepsis$class_proportion==c)],cex=0.5,xlab = 'AUC_sepsis',ylab='AUC_icu',main=paste('p=',p,'class_proportion=',c),ylim = c(0.35,0.8),xlim=c(0.5,0.84),pch=1,col=gray(0.8))
+    
+    points(x=result_sepsis$AUC[(result_sepsis$method=='OR')&(result_sepsis$train_proportion==p)&(result_sepsis$class_proportion==c)],y=result_icu$AUC[(result_sepsis$method=='OR')&(result_sepsis$train_proportion==p)&(result_sepsis$class_proportion==c)],cex=0.35,pch=19,col=gray(0.5))
+    
+    points(x=result_sepsis$AUC[(result_sepsis$method=='ORKD')&(result_sepsis$train_proportion==p)&(result_sepsis$class_proportion==c)],y=result_icu$AUC[(result_sepsis$method=='ORKD')&(result_sepsis$train_proportion==p)&(result_sepsis$class_proportion==c)],cex=0.35,col='black',pch=19)
+    legend(x='topleft',legend=c('NEWS','OR','ORKD'),col=c(gray(0.7),gray(0.3),'black'),pch=c(1,20,19),cex=0.75,pt.cex=0.5)
+    dev.off()
+  }
+}
+```
+
+```{r}
+result_sepsis
+result_icu
+write.csv(result_sepsis,file = 'ORKD_sepsis_result.csv')
+write.csv(result_icu,file = 'ORKD_icu_result.csv')
+```
+
+```{r}
+png(filename = 'Hist.png',res=100)
+par(mfrow=c(2,3))
+hist(as.numeric(na.omit(result_sepsis[(result_sepsis$train_proportion==0.05),]$alpha)),breaks = 20,main = 'p=0.05',xlab='alpha',ylim =c(0,400),xlim=c(0,1))
+hist(as.numeric(na.omit(result_sepsis[(result_sepsis$train_proportion==0.1),]$alpha)),breaks = 20,main = 'p=0.1',xlab='alpha',ylim =c(0,400),xlim=c(0,1))
+hist(as.numeric(na.omit(result_sepsis[(result_sepsis$train_proportion==0.2),]$alpha)),breaks = 20,main = 'p=0.2',xlab='alpha',ylim =c(0,400),xlim=c(0,1))
+hist(as.numeric(na.omit(result_sepsis[(result_sepsis$train_proportion==0.4),]$alpha)),breaks = 20,main = 'p=0.4',xlab='alpha',ylim =c(0,400),xlim=c(0,1))
+hist(as.numeric(na.omit(result_sepsis[(result_sepsis$train_proportion==0.8),]$alpha)),breaks = 20,main = 'p=0.8',xlab='alpha',ylim =c(0,400),xlim=c(0,1))
+dev.off()
+```
+
+```{r}
+par(mfrow=c(2,5))
+hist(as.numeric(na.omit(result_sepsis[(result_sepsis$train_proportion==0.05),]$lambda3)),breaks = 10,probability = T)
+hist(as.numeric(na.omit(result_sepsis[(result_sepsis$train_proportion==0.1),]$lambda3)),breaks = 10,probability = T)
+hist(as.numeric(na.omit(result_sepsis[(result_sepsis$train_proportion==0.2),]$lambda3)),breaks = 10,probability = T)
+hist(as.numeric(na.omit(result_sepsis[(result_sepsis$train_proportion==0.4),]$lambda3)),breaks = 10,probability = T)
+hist(as.numeric(na.omit(result_sepsis[(result_sepsis$train_proportion==0.8),]$lambda3)),breaks = 10,probability = T)
+```
+
+# Task2
+
+Question:
+
+- A detail: we shall perform normalization after train-valid-test decomposition.
+
+# Task2
+
+More question: 
+
+- Just as most papers mentioned, we shall take the weight of single sample points into consideration, such as using the difference between teacher prediction and true label.
+
+- The hyper-parameters play a critical role in the performance of models, we shall pay more attention to the theoretical analysis and give a general guidance on 
+ choosing hyper-parameters.
+ 
+- More about hyper-parameters: Setting hyper-parameters here is a form of adding weights. Moreover, we can regard it as adding some dark/(not obvious) information which cannot be presented by the current data and teacher. From this point of view, we can use the left variables in our data set to give a guidance on choosing hyper-parameters. Also, the above method is according with the medical background. We shall use the base variables to give a rough diagnosis and treat more variables as dark information to give a more precise diagnosis. 
+
+- Some intuition: The predictors in our data set can be divided into 2 types: Global and Local. The base variables are Global while some of the others may be Local. If we want to give a diagnosis on local diseases, the choice of global variables may be confusing. What is the precise relationship of globalization and localization between the variables and the diseases?
+ 
+
+# Task3
+
+There maybe something wrong with GPU server's IP, we cannot connect to it. 
+
+We shall take a offline check in the computer room on 12th floor.
+
+# A question
+
+- Consider the relationship between NPDE and ML.
+
+NPDE is given a PDE model, we want a precise numeric data/solution.
+
+ML is given the data/observation, we want a precise model.
+
+They are two sides of the same body.(but differ from the generating model and discriminant model.)
+
+But what does NN do? A explicit composite function.
+
+However, the reality may be a DE equation, which may have no explicit solution. So, the current methods are approximations at most. How to fit a DE model may be an interesting question.
