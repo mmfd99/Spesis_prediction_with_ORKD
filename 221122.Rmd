@@ -1,6 +1,5 @@
 ---
-title: "Report-221122"
-author: "SA21001115 Ji Yu"
+title: "Report"
 header-includes:
   - \usepackage{ctex}
 output: 
@@ -14,36 +13,11 @@ fontsize: 8pt
 knitr::opts_chunk$set(echo = FALSE,warning = FALSE)
 ```
 
-# Review
-
-In last week, we have shown that adding weighted samples has the same results as KLD regularization when we use logistic regression.
-
-In this week, we have the following tasks:
-
-- Task1: repeat the results on different size of training set and different proportion of classes 1000 times.
-
-- Task2: try it on ordinal regression and give a general algorithm for adding weighted samples.
-
-- Task3: Some problems about GPU server
-
-# Task1
-
-Here we give the same results as before.
-
-![](LRKLD.png){#id .class width=80% height=80%}
-
-# Task2
-
-The calculation in R is time-consuming, here we only give some informal results.
-
 ```{r,results='hide'}
 library(ordinal)
 library(sampling)
 library(pROC)
-```
 
-
-```{r}
 # dataset processing
 df_ini=read.csv(file='data.csv',header = T)
 df_ini=df_ini[,-1]
@@ -126,14 +100,7 @@ for (i in 1:nrow(P_ini)) {
   }
   P_ini[i,ncol(P_ini)]=1-f(-Score_all[i]+cut_points[(ncol(P_ini)-1)])
 }
-```
 
-```{r}
-table(df_ini$label)
-
-```
-
-```{r}
 result_sepsis=data.frame(matrix(ncol=8,nrow=1))
 names(result_sepsis)=c('AUC','method','train_proportion','class_proportion','alpha','lambda1','lambda2','lambda3')
 
@@ -146,8 +113,7 @@ p_set=c(0.05,0.1,0.2,0.4)
 c_proportion=matrix(data = c(300,1200,2700,9000,300,600,800,900,300,300,200,90),ncol=3)
 class_proportion=c('1:1:1','1:2:4','1:3:9','1:10:100')
 MAX_NUM=1000
-```
-```{r}
+
 for(c in 1:4)
 {
   for(j in 1:MAX_NUM)
@@ -301,24 +267,7 @@ for(c in 1:4)
   }
 }
 end_t=Sys.time()
-```
 
-```{r}
-result_sepsis=result_sepsis[-1,]
-result_icu=result_icu[-1,]
-cat(end_t-start_t)
-```
-```{r}
-result_sepsis
-result_icu
-```
-
-```{r}
-#p=0.05
-#result_sepsis$train_proportion=result_icu$train_proportion
-
-```
-```{r}
 i=0
 
 result_sepsis=read.csv('ORKD_sepsis_result.csv')
@@ -339,9 +288,7 @@ for(p in c(0.05,0.1,0.2,0.4)){
     dev.off()
   }
 }
-```
 
-```{r}
 result_sepsis
 result_icu
 write.csv(result_sepsis,file = 'ORKD_sepsis_result.csv')
