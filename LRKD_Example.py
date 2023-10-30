@@ -1,6 +1,3 @@
-#!/opt/anaconda3/envs/SA21001115/bin/python
-
-
 import torch
 import numpy as np
 import pandas as pd
@@ -38,26 +35,25 @@ from sklearn import preprocessing
 
 device=torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
 
-#torch.distributed.init_process_group(backend="nccl")
+# seed
 def seed_torch(seed):
 
     np.random.seed(seed)
     random.seed(seed)
-    os.environ['PYTHONHASHSEED'] =str(seed)#禁止hash随机化（unknown）
+    os.environ['PYTHONHASHSEED'] =str(seed)
 
-    torch.manual_seed(seed)#CPU种子
-    torch.cuda.manual_seed(seed)#当前GPU种子
-    torch.cuda.manual_seed_all(seed)#所有GPU种子
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
     torch.backends.cudnn.benchmark=False
-    torch.backends.cudnn.deterministic=True#cuDNN是NVIDIA针对神经网络的加速库，牺牲少量精度换取运算效率
+    torch.backends.cudnn.deterministic=True
 
 seed_number=2333
 
-
+# NEWS Scoring System
 def NEWS_score(data):
     NEWS=pd.DataFrame(index=data.index,columns=['NEWS_score','呼吸_score','血氧_score','收缩压_score','心率_score','意识_score','体温_score','sepsis','危险程度'],data=0)
-    #用for循环简单明了
     for i in data.index:
         if (data.loc[i,'呼吸']<=8)|(data.loc[i,'呼吸']>=25):
             NEWS.loc[i,'呼吸_score']=3
@@ -104,13 +100,14 @@ def NEWS_score(data):
         NEWS['危险程度']=data.loc[:,'危险程度']
     return NEWS
 
-
+# NEWS AUC
 def NEWS_AUC(data,target_name):
     NEWS=NEWS_score(data)
     NEWS_fpr,NEWS_tpr,thersholds=roc_curve(NEWS.loc[:,target_name].astype('int64'),NEWS['NEWS_score'])
     NEWS_auc=auc(NEWS_fpr,NEWS_tpr)
     return NEWS_auc
 
+# Train, validation and test set
 def set_split(data,p1,p2,target_name):
     #seed_torch(seed_number)
     tfd_train = {
@@ -134,27 +131,28 @@ def set_split(data,p1,p2,target_name):
 
     return train,valid,test
 
-#/home/SA21001115/SHENGLI/
-data_path = '/home/SA21001115/SHENGLI/wkp_lqy_220508-6.CSV'
+
+data_path = 'sepsis.CSV'
 da = pd.read_csv(data_path,encoding='gbk')
 choose_feature=['意识','体温','心率','呼吸','收缩压','血氧','白细胞计数']
 choose_feature_c=['体温','心率','呼吸','收缩压','血氧','白细胞计数']
 data=da.loc[:,choose_feature]
 data['sepsis']=da.loc[:,'sepsis']
-
 data.loc[data['意识']=='A','意识']=0
 data.loc[(data['意识']=='B')|(data['意识']=='C'),'意识']=1
 
-#分别得到阳性病人集和阴性病人集
+# positive and negative patients
 p_data=data.loc[data['sepsis']==1]
 n_data=data.loc[data['sepsis']==0]
 
+# Normalization of continuous variables
 def Norm(dat,col):
     m=dat[col].mean()
     s=dat[col].std()
     return (dat[col]-m)/s
 d = ['意识','sepsis']
 
+# Logistic regression AUC on test set
 def LR_AUC(train,valid,test,seed_number,target_name,choose_feature):
     for col in train.columns:
         if col in d:
@@ -185,14 +183,13 @@ def LR_AUC(train,valid,test,seed_number,target_name,choose_feature):
         'tol': list(np.arange(1e-2,1e-1,2e-2))
         #'C': list(np.arange(1e-2,1,5e-2))
     }
-    #随机搜索最大次数
-    MAX_EVALS=1
-
-    #记录最优超参数
+    
+    MAX_EVALS=100
+    
     best_score = 0
     for j in range(MAX_EVALS):
 
-        #选取超参数
+       
         #random.seed(j)
         random_params = {k: random.sample(v,1)[0] for k, v in param_grid.items()}
         tol=random_params['tol']
@@ -209,16 +206,16 @@ def LR_AUC(train,valid,test,seed_number,target_name,choose_feature):
 
         if LogR_auc>best_score:
             best_score=LogR_auc
-            joblib.dump(LogR,'/home/SA21001115/SHENGLI/SHENGLI_NEWS_sepsis/best_sklearn_LogR.dat')
+            joblib.dump(LogR,'best_sklearn_LogR.dat')
 
-    LogR=joblib.load('/home/SA21001115/SHENGLI/SHENGLI_NEWS_sepsis/best_sklearn_LogR.dat')
+    LogR=joblib.load('best_sklearn_LogR.dat')
     LogR_pre=LogR.predict_proba(x_test)[:,1].flatten()
     LogR_fpr,LogR_tpr,thersholds=roc_curve(y_test,LogR_pre)
 
     LogR_auc=auc(LogR_fpr,LogR_tpr)
     return LogR_auc,LogR
 
-
+# Prediction probabilities of NEWS scoring system
 def cal_new_NEWS_g(data,target_name):
     NEWS=NEWS_score(data)
     g_0=NEWS[NEWS[target_name]==0]['NEWS_score']
@@ -227,23 +224,16 @@ def cal_new_NEWS_g(data,target_name):
     new_g1=np.exp(g_1-3)/(1+np.exp(g_1-3))
     return new_g0,new_g1
 
-def NEWS_AUC(data,target_name):
-    NEWS=NEWS_score(data)
-    NEWS_fpr,NEWS_tpr,thersholds=roc_curve(NEWS.loc[:,target_name].astype('int64'),NEWS['NEWS_score'])
-    NEWS_auc=auc(NEWS_fpr,NEWS_tpr)
-    return NEWS_auc
 
+# Logistic regression with knowledge distillation
 def KLD_AUC(train,valid,test,seed_number,new_g0,new_g1,target_name,choose_feature):
-
-
-
-
+    # Normalization
     for col in train.columns:
         if col in d:
             train[col]=train[col]
         else:
             train[col]=Norm(train,col)
-
+    
     for col in valid.columns:
         if col in d:
             valid[col]=valid[col]
@@ -255,6 +245,7 @@ def KLD_AUC(train,valid,test,seed_number,new_g0,new_g1,target_name,choose_featur
             test[col]=test[col]
         else:
             test[col]=Norm(test,col)
+            
     train0 = train.copy(deep=True)
     train0.loc[:, 'sepsis'] = 0
 
@@ -265,40 +256,38 @@ def KLD_AUC(train,valid,test,seed_number,new_g0,new_g1,target_name,choose_featur
 
     x_train = torch.tensor(train_fin.loc[:, choose_feature].values.astype("float")).to(device)
     y_train = torch.tensor(train_fin.loc[:, 'sepsis'].values.astype("int64")).to(device)
-    #NN的随机种子设置（一定要设，不然对结果影响非常大，不利于结果分析）
-    #seed_torch(seed_number)
+   
+    
     param_grid={
         'learning_rate': list(np.arange(1e-3,2e-1,2e-3)),
         'epochs': list(np.arange(10,100,20)),
         'alpha': list(np.arange(0,1,1e-2)),
         'beta': list(np.arange(0,1,1e-2))
     }
-    #print('1008')
-    #数据x&y
+   
+   
     x_valid=torch.tensor(valid.loc[:,choose_feature].values.astype("float")).to(device)
     y_valid=torch.tensor(valid.loc[:,target_name].values.astype("int64")).to(device)
     x_test=torch.tensor(test.loc[:,choose_feature].values.astype("float")).to(device)
     y_test=torch.tensor(test.loc[:,target_name].values.astype("int64")).to(device)
-    #随机搜索最大次数
-    MAX_EVALS=50
-    #print('1009')
-    #记录最优超参数
+    
+    MAX_EVALS=100
+    
     best_score = 0
     best_Lambda0=0
     best_Lambda1=0
     for j in range(MAX_EVALS):
 
-        #选取超参数
-        #random.seed(j)
+        
         random_params = {k: random.sample(v,1)[0] for k, v in param_grid.items()}
 
         learning_rate=random_params['learning_rate']
         epoch=random_params['epochs']
-        #epoch=70
+        
         alpha=random_params['alpha']
-        #LAMBDA0=0
+        
         beta=random_params['beta']
-        #LAMBDA1=0
+        
 
         weight0 = []
         weight0.extend((1 - alpha) * beta * (1 - new_g0))
@@ -316,58 +305,47 @@ def KLD_AUC(train,valid,test,seed_number,new_g0,new_g1,target_name,choose_featur
         fc_net=nn.Sequential(
             nn.Linear(len(choose_feature),1)
         ).double()
-        #if torch.cuda.device_count() > 1:
-            #print("Let's use", torch.cuda.device_count(), "GPUs!")
-            #fc_net = nn.DataParallel(fc_net)
         fc_net.to(device)
 
 
-        #print('1010')
-        #fc_net.apply(weight_init)
-
+        
         loss_func=nn.functional.binary_cross_entropy
-        #print('1111')
-        #loss_func=loss_func.to(device)
-        #print('1112')
+        
+        
         optimizer = torch.optim.Adam(fc_net.parameters(), lr=learning_rate)
-        #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=20, eta_min=0.05)
-        #print('1011')
+        
         for i in range(epoch):
             lpre_y = fc_net(x_train)
             pre_y = lpre_y.exp() / (1 + lpre_y.exp())
-            #这两个loss的输入格式不一样，需要注意
+           
             loss = loss_func(pre_y.flatten(), y_train.double(),weight=weight,reduction='sum')
-            #epoch次数太多之后，f_0会非常接近0&1，这样在kl_div的计算中，f_0.log()会报错，此外，为了避免这种情况，还要对数据做标准化处理(总之数据标准化之后，就没出现数值错误)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            #scheduler.step()
+           
 
         out= fc_net(x_valid)
 
         out=out.exp()/(1+out.exp())
-        #out=out.to(device)
-        #print(out[:,0])
-        #fpr, tpr, thersholds = roc_curve(y_valid, out[:,0])
-
-        #print(y_valid)
-        #print(out[:,0].detach().cpu().numpy())
-        auc_nn = roc_auc_score(y_valid.cpu().numpy(),out[:,0].detach().cpu().numpy())#涉及梯度传播的要用detach()来去梯度运算
-        #print(auc_nn)
+       
+       
+        auc_nn = roc_auc_score(y_valid.cpu().numpy(),out[:,0].detach().cpu().numpy())
+        
         score=auc_nn
-        #print('1015')
+      
         if score>best_score:
             best_score=score
             best_alpha=alpha
             best_beta=beta
-            torch.save(fc_net,"/home/SA21001115/SHENGLI/SHENGLI_NEWS_sepsis/best_LRKLD.pkl")
+            torch.save(fc_net,"best_LRKLD.pkl")
 
-    best_net=torch.load('/home/SA21001115/SHENGLI/SHENGLI_NEWS_sepsis/best_LRKLD.pkl')
-    #结果
+    best_net=torch.load('best_LRKLD.pkl')
+    
     out= best_net(x_test)
     out=out.exp()/(1+out.exp())
     auc_nn = roc_auc_score(y_test.cpu().numpy(), out[:,0].detach().cpu().numpy())
     return auc_nn,best_net,best_alpha,best_beta
+
 
 all_p1=[0.05,0.1,0.2,0.4]
 p2=0.2
@@ -389,9 +367,8 @@ for p1 in all_p1:
     k=0
     #print(p1)
     for p in prop_set:
-        #print(p)
         for i in range(NUM):
-            #print(i)
+            
             try:
                 p_set=p_data.sample(n=p_NUM[prop_set.index(p)],random_state=i)
                 n_set=n_data.sample(n=n_NUM[prop_set.index(p)],random_state=i)
@@ -411,8 +388,7 @@ for p1 in all_p1:
                 AUC_RES.loc[3*k+2,'AUC'],best_LRKLD,best_alpha,best_beta= KLD_AUC(train,valid,test,seed_number,new_g0,new_g1,TARGET_NAME,choose_feature)
                 AUC_RES.loc[3*k+2,'prop']=p
                 AUC_RES.loc[3*k+2,'methods']='LRKLD'
-                #print(best_Lambda0,best_Lambda1)
-                #print('LRKLD')
+                
                 print(AUC_RES.loc[3*k,'AUC'],AUC_RES.loc[3*k+1,'AUC'],AUC_RES.loc[3*k+2,'AUC'])
                 param_RES.loc[k,'alpha']=best_alpha
                 param_RES.loc[k, 'beta']=best_beta
@@ -420,21 +396,10 @@ for p1 in all_p1:
                 k=k+1
             except:
                 continue
-                #/data/SA21001115/
-    AUC_RES.to_csv('/data/SA21001115/SHENGLI_NEWS_sepsis_auc%f'%p1+'.csv')
-    param_RES.to_csv('/data/SA21001115/SHENGLI_NEWS_sepsis_best_param%f'%p1+'.csv')
-'''
-    ax=fig.add_subplot(2,2,all_p1.index(p1)+1)
-    seaborn.boxplot(data=AUC_RES,
-                    x='prop',
-                    hue='methods',
-                    y='AUC',
-                    linewidth=0.75,
-                    width=0.75,
-                    palette='Blues',
-                    fliersize=0
-                    )
-    ax.set_title('Train set Prop='+str(p1))
-'''
+                
+    AUC_RES.to_csv('SHENGLI_NEWS_sepsis_auc%f'%p1+'.csv')
+    param_RES.to_csv('SHENGLI_NEWS_sepsis_best_param%f'%p1+'.csv')
+
+
 end=time.time()
 print(end-start)
